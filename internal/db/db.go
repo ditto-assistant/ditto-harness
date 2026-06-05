@@ -119,6 +119,14 @@ type SearchMemoriesParams struct {
 	Limit          int32
 }
 
+type ListRecentMemoriesParams struct {
+	UserID         string
+	KgID           string
+	SessionID      string
+	ExcludePairIDs []string
+	Limit          int32
+}
+
 type SearchSubjectsParams struct {
 	Embedding     []float32
 	UserID        string
@@ -204,6 +212,24 @@ func (q *Queries) FetchMemories(ctx context.Context, userID string, pairIDs []st
 	return out, nil
 }
 
+func (q *Queries) ListRecentMemories(ctx context.Context, p ListRecentMemoriesParams) ([]MemoryPair, error) {
+	rows, err := q.raw.ListRecentMemories(ctx, sqlc.ListRecentMemoriesParams{
+		UserID:         p.UserID,
+		KgID:           p.KgID,
+		SessionID:      p.SessionID,
+		ExcludePairIds: p.ExcludePairIDs,
+		LimitCount:     p.Limit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]MemoryPair, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, memoryPairFromRecent(row))
+	}
+	return out, nil
+}
+
 func (q *Queries) SearchMemories(ctx context.Context, p SearchMemoriesParams) ([]ScoredMemoryPair, error) {
 	rows, err := q.raw.SearchMemories(ctx, sqlc.SearchMemoriesParams{
 		Embedding:      vectorValue(p.Embedding),
@@ -284,6 +310,29 @@ func memoryPairFromCreate(row sqlc.CreateMemoryPairRow) (MemoryPair, error) {
 }
 
 func memoryPairFromFetch(row sqlc.FetchMemoriesRow) MemoryPair {
+	return MemoryPair{
+		ID:                    uuidFromPG(row.ID),
+		FirestorePairID:       row.FirestorePairID,
+		UserID:                row.UserID,
+		KgID:                  row.KgID,
+		SessionID:             row.SessionID.String,
+		Title:                 row.Title.String,
+		Description:           row.Description.String,
+		Prompt:                row.Prompt.String,
+		Response:              row.Response.String,
+		Input:                 row.Input,
+		Output:                row.Output,
+		Source:                row.Source.String,
+		SourceContext:         row.SourceContext.String,
+		Timestamp:             timeFromPG(row.Timestamp),
+		TimezoneOffset:        int32Ptr(row.TimezoneOffset),
+		SeedMemories:          row.SeedMemories,
+		RetrievalMetadata:     row.RetrievalMetadata,
+		ConversationEmbedding: row.ConversationEmbedding.Slice(),
+	}
+}
+
+func memoryPairFromRecent(row sqlc.ListRecentMemoriesRow) MemoryPair {
 	return MemoryPair{
 		ID:                    uuidFromPG(row.ID),
 		FirestorePairID:       row.FirestorePairID,

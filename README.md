@@ -9,6 +9,7 @@ The harness does not persist billing receipts or closed-source Ditto application
 - `pkg/memory`: memory ingestion, fetch, vector search, composite search, subject search, subject-scoped memory search, retrieval metadata, and prompt context.
 - `pkg/retrieval`: composite retrieval, retrieval event logging, auxiliary feature extraction, and a loadable learned-weight MLP predictor.
 - `pkg/agent`: importable multi-turn agent loop with injectable models/tools, stream-style event hooks, tool loop detection, and cost collection.
+- `pkg/chatv2`: importable chat harness facade that prepares memory context, combines injected tools with memory tools, runs the agent loop, returns cost data, and saves the resulting memory pair with seed/retrieval metadata.
 - `pkg/mcpserver`: MCP tools for `save_memory`, `search_memories`, `search_subjects`, `search_memories_in_subjects`, and `fetch_memories`.
 - `pkg/harness`: shared content, memory, subject, usage, and tool types.
 - `pkg/testpg`: ephemeral PostgreSQL test helpers.
@@ -45,3 +46,9 @@ The learned retrieval model is exposed as `retrieval.LoadMLPPredictor` /
 `retrieval.LoadMLPPredictorFromReader`. This repo does not embed a model
 artifact; importing applications such as `chatv2` can load their deployed model
 file and pass the resulting predictor into `memory.Store.SearchCompositeMemories`.
+
+For backend-style chat integration, construct `chatv2.Harness` with a
+`memory.Store`, host `harness.Model`, and any application-specific
+`harness.Tool` values. Set `IncludeMemoryTools` to expose the standard memory
+tools in the same agent loop while keeping closed-source Ditto tools outside
+this module.

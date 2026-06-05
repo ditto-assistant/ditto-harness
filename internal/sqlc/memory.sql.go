@@ -229,6 +229,92 @@ func (q *Queries) LinkSubjectMemoryPair(ctx context.Context, arg LinkSubjectMemo
 	return err
 }
 
+const listRecentMemories = `-- name: ListRecentMemories :many
+SELECT id, firestore_pair_id, user_id, kg_id, session_id, title, description,
+    prompt, response, input, output, source, source_context, timestamp,
+    timezone_offset, seed_memories, retrieval_metadata, conversation_embedding
+FROM memory_pairs
+WHERE user_id = $1 AND kg_id = $2
+  AND COALESCE(session_id, 'main') = COALESCE(NULLIF($3::text, ''), 'main')
+  AND ($4::text[] IS NULL OR firestore_pair_id != ALL($4::text[]))
+ORDER BY timestamp DESC
+LIMIT $5
+`
+
+type ListRecentMemoriesParams struct {
+	UserID         string   `json:"userId"`
+	KgID           string   `json:"kgId"`
+	SessionID      string   `json:"sessionId"`
+	ExcludePairIds []string `json:"excludePairIds"`
+	LimitCount     int32    `json:"limitCount"`
+}
+
+type ListRecentMemoriesRow struct {
+	ID                    pgtype.UUID        `json:"id"`
+	FirestorePairID       string             `json:"firestorePairId"`
+	UserID                string             `json:"userId"`
+	KgID                  string             `json:"kgId"`
+	SessionID             pgtype.Text        `json:"sessionId"`
+	Title                 pgtype.Text        `json:"title"`
+	Description           pgtype.Text        `json:"description"`
+	Prompt                pgtype.Text        `json:"prompt"`
+	Response              pgtype.Text        `json:"response"`
+	Input                 []byte             `json:"input"`
+	Output                []byte             `json:"output"`
+	Source                pgtype.Text        `json:"source"`
+	SourceContext         pgtype.Text        `json:"sourceContext"`
+	Timestamp             pgtype.Timestamptz `json:"timestamp"`
+	TimezoneOffset        pgtype.Int4        `json:"timezoneOffset"`
+	SeedMemories          []byte             `json:"seedMemories"`
+	RetrievalMetadata     []byte             `json:"retrievalMetadata"`
+	ConversationEmbedding pgvector.Vector    `json:"conversationEmbedding"`
+}
+
+func (q *Queries) ListRecentMemories(ctx context.Context, arg ListRecentMemoriesParams) ([]ListRecentMemoriesRow, error) {
+	rows, err := q.db.Query(ctx, listRecentMemories,
+		arg.UserID,
+		arg.KgID,
+		arg.SessionID,
+		arg.ExcludePairIds,
+		arg.LimitCount,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListRecentMemoriesRow
+	for rows.Next() {
+		var i ListRecentMemoriesRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.FirestorePairID,
+			&i.UserID,
+			&i.KgID,
+			&i.SessionID,
+			&i.Title,
+			&i.Description,
+			&i.Prompt,
+			&i.Response,
+			&i.Input,
+			&i.Output,
+			&i.Source,
+			&i.SourceContext,
+			&i.Timestamp,
+			&i.TimezoneOffset,
+			&i.SeedMemories,
+			&i.RetrievalMetadata,
+			&i.ConversationEmbedding,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const searchMemories = `-- name: SearchMemories :many
 SELECT id, firestore_pair_id, user_id, kg_id, session_id, title, description,
     prompt, response, input, output, source, source_context, timestamp,

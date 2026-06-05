@@ -62,6 +62,17 @@ FROM memory_pairs
 WHERE user_id = sqlc.arg(user_id) AND firestore_pair_id = ANY(sqlc.arg(pair_ids)::text[])
 ORDER BY array_position(sqlc.arg(pair_ids)::text[], firestore_pair_id);
 
+-- name: ListRecentMemories :many
+SELECT id, firestore_pair_id, user_id, kg_id, session_id, title, description,
+    prompt, response, input, output, source, source_context, timestamp,
+    timezone_offset, seed_memories, retrieval_metadata, conversation_embedding
+FROM memory_pairs
+WHERE user_id = sqlc.arg(user_id) AND kg_id = sqlc.arg(kg_id)
+  AND COALESCE(session_id, 'main') = COALESCE(NULLIF(sqlc.arg(session_id)::text, ''), 'main')
+  AND (sqlc.arg(exclude_pair_ids)::text[] IS NULL OR firestore_pair_id != ALL(sqlc.arg(exclude_pair_ids)::text[]))
+ORDER BY timestamp DESC
+LIMIT sqlc.arg(limit_count);
+
 -- name: SearchMemories :many
 SELECT id, firestore_pair_id, user_id, kg_id, session_id, title, description,
     prompt, response, input, output, source, source_context, timestamp,
