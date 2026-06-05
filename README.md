@@ -8,7 +8,7 @@ The harness does not persist billing receipts or closed-source Ditto application
 
 - `pkg/memory`: memory ingestion, fetch, vector search, composite search, subject search, subject-scoped memory search, retrieval metadata, and prompt context.
 - `pkg/retrieval`: composite retrieval, retrieval event logging, and learned-weight extension hooks.
-- `pkg/agent`: importable multi-turn agent loop with injectable models and tools.
+- `pkg/agent`: importable multi-turn agent loop with injectable models/tools, stream-style event hooks, tool loop detection, and cost collection.
 - `pkg/mcpserver`: MCP tools for `save_memory`, `search_memories`, `search_subjects`, `search_memories_in_subjects`, and `fetch_memories`.
 - `pkg/harness`: shared content, memory, subject, usage, and tool types.
 - `pkg/testpg`: ephemeral PostgreSQL test helpers.
@@ -38,3 +38,5 @@ go test ./...
 Postgres integration tests require `DITTO_HARNESS_TEST_DATABASE_URL` pointing at an admin database that can create and drop test databases.
 
 The default test command is still useful without Postgres: integration tests skip when `DITTO_HARNESS_TEST_DATABASE_URL` is unset.
+
+Host applications bridge their model provider into `harness.Model` and can observe loop events by implementing `agent.EventHandler`. Backend-specific streaming transports, billing persistence, and app-only tools stay outside this repo.

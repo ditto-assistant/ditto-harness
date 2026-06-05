@@ -15,5 +15,5 @@ Use this skill when changing the open-source Ditto agent memory harness.
 
 - `pkg/memory` owns save/search/fetch/subject retrieval and prompt context assembly.
 - `pkg/retrieval` owns composite retrieval, retrieval event logging, and learned-weight extension hooks.
-- `pkg/agent` owns the importable agent loop.
+- `pkg/agent` owns the importable agent loop, stream-style event hooks, tool execution, and loop detection.
 - `pkg/mcpserver` exposes memory tools over MCP.
