@@ -26,7 +26,7 @@ jobs:
       DITTO_HARNESS_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@v6
         with:
           go-version: '1.26.x'
           cache: true
