@@ -112,7 +112,7 @@ func (s *Server) handleSearchMemories(ctx context.Context, request mcp.CallToolR
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	return toolJSON(map[string]any{"memories": memories})
+	return toolJSON(map[string]any{"memories": memory.SlimPreviews(memories, memory.DefaultPreviewLen)})
 }
 
 func (s *Server) handleSearchSubjects(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -149,7 +149,7 @@ func (s *Server) handleSearchMemoriesInSubjects(ctx context.Context, request mcp
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	return toolJSON(map[string]any{"memories": memories})
+	return toolJSON(map[string]any{"memories": memory.SlimPreviews(memories, memory.DefaultPreviewLen)})
 }
 
 func (s *Server) handleFetchMemories(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -163,7 +163,7 @@ func (s *Server) handleFetchMemories(ctx context.Context, request mcp.CallToolRe
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	return toolJSON(map[string]any{"memories": memories})
+	return toolJSON(map[string]any{"memories": memory.SlimTruncated(memories, memory.DefaultFetchMaxBytes)})
 }
 
 func (s *Server) ready() error {

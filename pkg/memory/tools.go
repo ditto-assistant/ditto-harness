@@ -9,9 +9,11 @@ import (
 )
 
 type ToolOptions struct {
-	UserID string
-	KGID   string
-	Store  *Store
+	UserID        string
+	KGID          string
+	Store         *Store
+	PreviewLen    int
+	FetchMaxBytes int
 }
 
 func Tools(opts ToolOptions) []harness.Tool {
@@ -82,7 +84,7 @@ func SearchMemoriesTool(opts ToolOptions) harness.Tool {
 			if err != nil {
 				return nil, err
 			}
-			return map[string]any{"memories": memories}, nil
+			return map[string]any{"memories": SlimPreviews(memories, opts.previewLen())}, nil
 		},
 	}
 }
@@ -140,7 +142,7 @@ func SearchMemoriesInSubjectsTool(opts ToolOptions) harness.Tool {
 			if err != nil {
 				return nil, err
 			}
-			return map[string]any{"memories": memories}, nil
+			return map[string]any{"memories": SlimPreviews(memories, opts.previewLen())}, nil
 		},
 	}
 }
@@ -161,9 +163,23 @@ func FetchMemoriesTool(opts ToolOptions) harness.Tool {
 			if err != nil {
 				return nil, err
 			}
-			return map[string]any{"memories": memories}, nil
+			return map[string]any{"memories": SlimTruncated(memories, opts.fetchMaxBytes())}, nil
 		},
 	}
+}
+
+func (opts ToolOptions) previewLen() int {
+	if opts.PreviewLen > 0 {
+		return opts.PreviewLen
+	}
+	return DefaultPreviewLen
+}
+
+func (opts ToolOptions) fetchMaxBytes() int {
+	if opts.FetchMaxBytes > 0 {
+		return opts.FetchMaxBytes
+	}
+	return DefaultFetchMaxBytes
 }
 
 type tool struct {

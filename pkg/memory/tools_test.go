@@ -52,7 +52,10 @@ func TestMemoryToolsCallThroughStore(t *testing.T) {
 	}
 	var payload struct {
 		Memories []struct {
-			ID string `json:"id"`
+			ID      string `json:"id"`
+			Preview string `json:"preview"`
+			User    string `json:"user"`
+			Ditto   string `json:"ditto"`
 		} `json:"memories"`
 	}
 	if err := json.Unmarshal(resp.Output, &payload); err != nil {
@@ -60,5 +63,28 @@ func TestMemoryToolsCallThroughStore(t *testing.T) {
 	}
 	if len(payload.Memories) != 1 {
 		t.Fatalf("search returned %d memories, want 1", len(payload.Memories))
+	}
+	if payload.Memories[0].Preview == "" || payload.Memories[0].User != "" || payload.Memories[0].Ditto != "" {
+		t.Fatalf("search should return slim previews only: %+v", payload.Memories[0])
+	}
+
+	fetch := tools[4]
+	resp, err = fetch.Call(ctx, json.RawMessage(`{"pairIds":["`+payload.Memories[0].ID+`"]}`))
+	if err != nil {
+		t.Fatalf("fetch tool: %v", err)
+	}
+	var fetched struct {
+		Memories []struct {
+			ID      string `json:"id"`
+			Preview string `json:"preview"`
+			User    string `json:"user"`
+			Ditto   string `json:"ditto"`
+		} `json:"memories"`
+	}
+	if err := json.Unmarshal(resp.Output, &fetched); err != nil {
+		t.Fatalf("unmarshal fetch output: %v", err)
+	}
+	if len(fetched.Memories) != 1 || fetched.Memories[0].User == "" || fetched.Memories[0].Ditto == "" || fetched.Memories[0].Preview != "" {
+		t.Fatalf("fetch should return truncated full slim memory: %+v", fetched.Memories)
 	}
 }

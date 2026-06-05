@@ -6,7 +6,7 @@ The harness does not persist billing receipts or closed-source Ditto application
 
 ## Packages
 
-- `pkg/memory`: memory ingestion, fetch, vector search, composite search, subject search, subject-scoped memory search, retrieval metadata, and prompt context.
+- `pkg/memory`: memory ingestion, fetch, vector search, composite search, subject search, subject-scoped memory search, slim memory tool payloads, retrieval metadata, and prompt context.
 - `pkg/retrieval`: composite retrieval, retrieval event logging, auxiliary feature extraction, and a loadable learned-weight MLP predictor.
 - `pkg/agent`: importable multi-turn agent loop with injectable models/tools, stream-style event hooks, tool loop detection, and cost collection.
 - `pkg/chatv2`: importable chat harness facade that prepares memory context, combines injected tools with memory tools, runs the agent loop, returns cost data, and saves the resulting memory pair with seed/retrieval metadata.
@@ -52,3 +52,8 @@ For backend-style chat integration, construct `chatv2.Harness` with a
 `harness.Tool` values. Set `IncludeMemoryTools` to expose the standard memory
 tools in the same agent loop while keeping closed-source Ditto tools outside
 this module.
+
+Memory search tools and MCP search handlers return slim preview objects by
+default. `fetch_memories` returns truncated full user/assistant text for the
+selected IDs. This keeps agent tool results token-efficient while still letting
+the host fetch detailed memory content when needed.
