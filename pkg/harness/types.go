@@ -75,7 +75,13 @@ type Memory struct {
 	RetrievalMetadata *RetrievalMetadata `json:"retrievalMetadata,omitempty"`
 	Embedding         []float32          `json:"-"`
 	Similarity        float64            `json:"similarity,omitempty"`
+	RecencyScore      float64            `json:"recencyScore,omitempty"`
+	FrequencyScore    float64            `json:"frequencyScore,omitempty"`
 	CompositeScore    float64            `json:"compositeScore,omitempty"`
+	RecencyExp        float64            `json:"recencyExp,omitempty"`
+	SubjectSemMatch   float64            `json:"subjectSemMatch,omitempty"`
+	SessionContinuity float64            `json:"sessionContinuity,omitempty"`
+	NeighborDensity   float64            `json:"neighborDensity,omitempty"`
 }
 
 type Subject struct {

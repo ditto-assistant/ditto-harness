@@ -6,8 +6,8 @@ The harness does not persist billing receipts or closed-source Ditto application
 
 ## Packages
 
-- `pkg/memory`: memory ingestion, fetch, search, subject search, subject-scoped memory search, and prompt context.
-- `pkg/retrieval`: composite retrieval and learned-weight extension hooks.
+- `pkg/memory`: memory ingestion, fetch, vector search, composite search, subject search, subject-scoped memory search, retrieval metadata, and prompt context.
+- `pkg/retrieval`: composite retrieval, retrieval event logging, and learned-weight extension hooks.
 - `pkg/agent`: importable multi-turn agent loop with injectable models and tools.
 - `pkg/mcpserver`: MCP tools for `save_memory`, `search_memories`, `search_subjects`, `search_memories_in_subjects`, and `fetch_memories`.
 - `pkg/harness`: shared content, memory, subject, usage, and tool types.
@@ -35,3 +35,5 @@ go test ./...
 ```
 
 Postgres integration tests require `DITTO_HARNESS_TEST_DATABASE_URL` pointing at an admin database that can create and drop test databases.
+
+The default test command is still useful without Postgres: integration tests skip when `DITTO_HARNESS_TEST_DATABASE_URL` is unset.

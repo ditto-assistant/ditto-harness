@@ -34,6 +34,14 @@ type CompositeMemory struct {
 	NeighborDensity   float64 `json:"neighborDensity,omitempty"`
 }
 
+func (m CompositeMemory) RetrievalMetadata(weights Weights, variant Variant, ids []string) map[string]any {
+	return map[string]any{
+		"variant":          variant,
+		"weights":          weights,
+		"retrievedPairIds": ids,
+	}
+}
+
 type CompositeParams struct {
 	Embedding         []float32
 	UserID            string
@@ -46,6 +54,9 @@ type CompositeParams struct {
 	ExcludePairIDs    []string
 	Weights           Weights
 	Variant           Variant
+	RequestPath       string
+	Query             string
+	LogEvent          bool
 }
 
 type Weights struct {
@@ -109,10 +120,26 @@ func CompositeRetrieve(ctx context.Context, db DBTX, p CompositeParams) ([]Compo
 	if p.Weights.Scale == 0 {
 		p.Weights.Scale = 1
 	}
+	var (
+		results []CompositeMemory
+		err     error
+	)
 	if p.Variant == VariantV2 {
-		return compositeRetrieveV2(ctx, db, p)
+		results, err = compositeRetrieveV2(ctx, db, p)
+	} else {
+		results, err = compositeRetrieveV1(ctx, db, p)
 	}
-	return compositeRetrieveV1(ctx, db, p)
+	if err != nil {
+		return nil, err
+	}
+	if p.LogEvent {
+		_ = LogEvent(ctx, db, p.UserID, p.KGID, p.SessionID, p.RequestPath, p.Query, p.Embedding, pairIDs(results), p.Weights, Features{
+			Query:            p.Query,
+			Now:              time.Now().UTC(),
+			CurrentSessionID: p.CurrentSessionID,
+		})
+	}
+	return results, nil
 }
 
 func compositeRetrieveV1(ctx context.Context, db DBTX, p CompositeParams) ([]CompositeMemory, error) {
@@ -317,4 +344,14 @@ func vectorOrNil(v []float32) any {
 		return nil
 	}
 	return pgvector.NewVector(v)
+}
+
+func pairIDs(results []CompositeMemory) []string {
+	out := make([]string, 0, len(results))
+	for _, result := range results {
+		if result.PairID != "" {
+			out = append(out, result.PairID)
+		}
+	}
+	return out
 }

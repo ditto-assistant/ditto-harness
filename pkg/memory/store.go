@@ -10,23 +10,26 @@ import (
 
 	"github.com/ditto-assistant/ditto-harness/internal/db"
 	"github.com/ditto-assistant/ditto-harness/pkg/harness"
+	"github.com/ditto-assistant/ditto-harness/pkg/retrieval"
 	"github.com/google/uuid"
 )
 
 var ErrNoEmbedder = errors.New("memory: embedder is required")
 
 type Store struct {
-	q        *db.Queries
-	embedder harness.Embedder
+	q         *db.Queries
+	embedder  harness.Embedder
+	predictor retrieval.WeightPredictor
 }
 
 type Options struct {
-	Queries  *db.Queries
-	Embedder harness.Embedder
+	Queries   *db.Queries
+	Embedder  harness.Embedder
+	Predictor retrieval.WeightPredictor
 }
 
 func NewStore(opts Options) *Store {
-	return &Store{q: opts.Queries, embedder: opts.Embedder}
+	return &Store{q: opts.Queries, embedder: opts.Embedder, predictor: opts.Predictor}
 }
 
 type SaveMemoryRequest struct {
@@ -63,6 +66,19 @@ type SearchMemoriesRequest struct {
 	Limit          int
 	MinSimilarity  float64
 	ExcludePairIDs []string
+}
+
+type CompositeSearchRequest struct {
+	UserID            string
+	KGID              string
+	SessionID         string
+	Query             string
+	Limit             int
+	CandidatePoolSize int
+	ExcludePairIDs    []string
+	Variant           retrieval.Variant
+	RequestPath       string
+	LogEvent          bool
 }
 
 type SearchSubjectsRequest struct {
@@ -240,6 +256,100 @@ func (s *Store) SearchMemories(ctx context.Context, req SearchMemoriesRequest) (
 		}
 	}
 	return out, nil
+}
+
+func (s *Store) SearchCompositeMemories(ctx context.Context, req CompositeSearchRequest) ([]harness.Memory, *harness.RetrievalMetadata, error) {
+	if s.q == nil {
+		return nil, nil, errors.New("memory: queries are required")
+	}
+	if req.KGID == "" {
+		req.KGID = harness.KGID(req.UserID)
+	}
+	if req.Limit <= 0 {
+		req.Limit = 8
+	}
+	if req.CandidatePoolSize <= 0 {
+		req.CandidatePoolSize = max(32, req.Limit*4)
+	}
+	if req.Variant == "" {
+		req.Variant = retrieval.VariantLegacy
+	}
+	embedResp, err := s.embedTexts(ctx, []string{req.Query})
+	if err != nil {
+		return nil, nil, err
+	}
+	embedding := firstEmbedding(embedResp)
+	weights := retrieval.DefaultWeights()
+	intent := "semantic"
+	if s.predictor != nil {
+		predicted, err := s.predictor.Predict(ctx, retrieval.Features{
+			Query:            req.Query,
+			Now:              time.Now().UTC(),
+			CurrentSessionID: req.SessionID,
+		})
+		if err != nil {
+			return nil, nil, fmt.Errorf("predict retrieval weights: %w", err)
+		}
+		weights = predicted
+		intent = "learned"
+	}
+	results, err := retrieval.CompositeRetrieve(ctx, s.q.DB(), retrieval.CompositeParams{
+		Embedding:         embedding,
+		UserID:            req.UserID,
+		KGID:              req.KGID,
+		SessionID:         req.SessionID,
+		CurrentSessionID:  req.SessionID,
+		Limit:             req.Limit,
+		CandidatePoolSize: req.CandidatePoolSize,
+		ExcludePairIDs:    req.ExcludePairIDs,
+		Weights:           weights,
+		Variant:           req.Variant,
+		RequestPath:       req.RequestPath,
+		Query:             req.Query,
+		LogEvent:          req.LogEvent,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	pairIDs := make([]string, 0, len(results))
+	scoreByID := make(map[string]retrieval.CompositeMemory, len(results))
+	for _, result := range results {
+		pairIDs = append(pairIDs, result.PairID)
+		scoreByID[result.PairID] = result
+	}
+	memories, err := s.FetchMemories(ctx, FetchMemoriesRequest{UserID: req.UserID, PairIDs: pairIDs})
+	if err != nil {
+		return nil, nil, err
+	}
+	for i := range memories {
+		score := scoreByID[memories[i].ID]
+		memories[i].Similarity = score.CosineSimilarity
+		memories[i].RecencyScore = score.RecencyScore
+		memories[i].FrequencyScore = score.FrequencyScore
+		memories[i].CompositeScore = score.CompositeScore
+		memories[i].RecencyExp = score.RecencyExp
+		memories[i].SubjectSemMatch = score.SubjectSemMatch
+		memories[i].SessionContinuity = score.SessionContinuity
+		memories[i].NeighborDensity = score.NeighborDensity
+	}
+	metadata := &harness.RetrievalMetadata{
+		Intent: intent,
+		Weights: map[string]float64{
+			"cosine":            weights.Cosine,
+			"recencyLinear":     weights.RecencyLinear,
+			"recencyExp":        weights.RecencyExp,
+			"subjectFrequency":  weights.SubjectFrequency,
+			"subjectSemMatch":   weights.SubjectSemMatch,
+			"sessionContinuity": weights.SessionContinuity,
+			"neighborDensity":   weights.NeighborDensity,
+			"scale":             weights.Scale,
+		},
+		Scale:               weights.Scale,
+		Variant:             string(req.Variant),
+		RetrievedPairIDs:    pairIDs,
+		QueryEmbeddingModel: "host",
+	}
+	return memories, metadata, nil
 }
 
 func (s *Store) SearchSubjects(ctx context.Context, req SearchSubjectsRequest) ([]harness.Subject, error) {
