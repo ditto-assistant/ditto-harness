@@ -285,6 +285,7 @@ func (s *Store) SearchCompositeMemories(ctx context.Context, req CompositeSearch
 		predicted, err := s.predictor.Predict(ctx, retrieval.Features{
 			Query:            req.Query,
 			Now:              time.Now().UTC(),
+			QueryEmbedding:   embedding,
 			CurrentSessionID: req.SessionID,
 		})
 		if err != nil {

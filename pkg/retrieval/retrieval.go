@@ -22,6 +22,17 @@ const (
 	VariantV2     Variant = "v2"
 )
 
+const (
+	V2WeightCosine = iota
+	V2WeightRecencyLinear
+	V2WeightRecencyExp
+	V2WeightSubjectFrequency
+	V2WeightSubjectSemMatch
+	V2WeightSessionContinuity
+	V2WeightNeighborDensity
+	V2NumWeights
+)
+
 type CompositeMemory struct {
 	PairID            string  `json:"pairId"`
 	CosineSimilarity  float64 `json:"cosineSimilarity"`
@@ -86,6 +97,7 @@ type WeightPredictor interface {
 type Features struct {
 	Query                 string    `json:"query,omitempty"`
 	Now                   time.Time `json:"now,omitempty"`
+	QueryEmbedding        []float32 `json:"-"`
 	ShortTermMemoryCount  int       `json:"shortTermMemoryCount,omitempty"`
 	CandidateMemoryCount  int       `json:"candidateMemoryCount,omitempty"`
 	CurrentSessionID      string    `json:"currentSessionId,omitempty"`
