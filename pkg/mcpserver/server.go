@@ -56,22 +56,33 @@ func (s *Server) registerTools() {
 		mcp.WithString("response", mcp.Description("Assistant-side memory text.")),
 		mcp.WithString("summary", mcp.Description("Compact memory summary.")),
 		mcp.WithString("sessionId", mcp.Description("Optional session/thread id.")),
+		mcp.WithArray("subjects", mcp.Description("Optional subjects to link to the saved memory."), mcp.Items(map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"text":        map[string]any{"type": "string"},
+				"description": map[string]any{"type": "string"},
+				"key":         map[string]any{"type": "boolean"},
+			},
+		})),
 	), s.handleSaveMemory)
 
 	s.AddTool(mcp.NewTool("search_memories",
 		mcp.WithDescription("Search past memories by semantic similarity."),
 		mcp.WithArray("queries", mcp.Required(), mcp.Items(map[string]any{"type": "string"})),
+		mcp.WithNumber("topK", mcp.Description("Maximum number of preview memories to return.")),
 	), s.handleSearchMemories)
 
 	s.AddTool(mcp.NewTool("search_subjects",
 		mcp.WithDescription("Search the subject graph and return subject ids."),
 		mcp.WithArray("queries", mcp.Required(), mcp.Items(map[string]any{"type": "string"})),
+		mcp.WithNumber("topK", mcp.Description("Maximum number of subjects to return.")),
 	), s.handleSearchSubjects)
 
 	s.AddTool(mcp.NewTool("search_memories_in_subjects",
 		mcp.WithDescription("Search memories linked to a subject."),
 		mcp.WithString("subject_id", mcp.Required()),
 		mcp.WithArray("queries", mcp.Required(), mcp.Items(map[string]any{"type": "string"})),
+		mcp.WithNumber("topK", mcp.Description("Maximum number of preview memories to return.")),
 	), s.handleSearchMemoriesInSubjects)
 
 	s.AddTool(mcp.NewTool("fetch_memories",
@@ -84,14 +95,25 @@ func (s *Server) handleSaveMemory(ctx context.Context, request mcp.CallToolReque
 	if err := s.ready(); err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
+	var args struct {
+		Prompt    string                `json:"prompt"`
+		Response  string                `json:"response"`
+		Summary   string                `json:"summary"`
+		SessionID string                `json:"sessionId"`
+		Subjects  []memory.SubjectInput `json:"subjects"`
+	}
+	if err := request.BindArguments(&args); err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
 	mem, err := s.store.SaveMemory(ctx, memory.SaveMemoryRequest{
 		UserID:    s.userID,
 		KGID:      s.kgID,
-		SessionID: request.GetString("sessionId", ""),
-		Prompt:    request.GetString("prompt", ""),
-		Response:  request.GetString("response", ""),
-		Summary:   request.GetString("summary", ""),
+		SessionID: args.SessionID,
+		Prompt:    args.Prompt,
+		Response:  args.Response,
+		Summary:   args.Summary,
 		Source:    "mcp",
+		Subjects:  args.Subjects,
 	})
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil

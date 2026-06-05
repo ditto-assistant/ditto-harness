@@ -6,6 +6,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/mark3labs/mcp-go v0.49.0
+	github.com/omniaura/go-kit/convert/sqlconv/pgconv v0.0.0-20260401194942-1866303213f2
 	github.com/pgvector/pgvector-go v0.3.0
 )
 

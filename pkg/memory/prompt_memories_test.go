@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ditto-assistant/ditto-harness/internal/db"
+	"github.com/ditto-assistant/ditto-harness/pkg/db"
 	"github.com/ditto-assistant/ditto-harness/pkg/testpg"
 )
 

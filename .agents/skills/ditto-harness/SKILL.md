@@ -20,4 +20,4 @@ Use this skill when changing the open-source Ditto agent memory harness.
 - `pkg/agent` owns the importable agent loop, stream-style event hooks, tool execution, and loop detection.
 - `pkg/chatv2` owns the importable backend-style facade that prepares memory context and runs/saves the agent turn.
 - `pkg/mcpserver` exposes memory tools over MCP.
-- `pkg/db` is the public adapter constructor; keep generated sqlc and implementation details under `internal/`.
+- `pkg/db` is the generated public sqlc query package; avoid adding a separate DB adapter layer.

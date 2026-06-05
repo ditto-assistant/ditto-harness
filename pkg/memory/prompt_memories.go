@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/ditto-assistant/ditto-harness/internal/db"
+	"github.com/ditto-assistant/ditto-harness/pkg/db"
 	"github.com/ditto-assistant/ditto-harness/pkg/harness"
 	"github.com/ditto-assistant/ditto-harness/pkg/retrieval"
 )
@@ -113,15 +113,15 @@ func (s *Store) ListRecentMemories(ctx context.Context, req ListRecentMemoriesRe
 		UserID:         req.UserID,
 		KgID:           req.KGID,
 		SessionID:      req.SessionID,
-		ExcludePairIDs: req.ExcludePairIDs,
-		Limit:          int32(req.Limit),
+		ExcludePairIds: req.ExcludePairIDs,
+		LimitCount:     int32(req.Limit),
 	})
 	if err != nil {
 		return nil, err
 	}
 	out := make([]harness.Memory, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, memoryFromDB(row))
+		out = append(out, memoryFromRecent(row))
 	}
 	return out, nil
 }

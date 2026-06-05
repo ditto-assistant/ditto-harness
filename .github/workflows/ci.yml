@@ -31,5 +31,5 @@ jobs:
           go-version: '1.26.x'
           cache: true
       - run: go tool sqlc generate -f sqlc.yaml
-      - run: git diff --exit-code internal/sqlc
+      - run: git diff --exit-code pkg/db
       - run: go test ./...

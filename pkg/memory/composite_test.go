@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/ditto-assistant/ditto-harness/internal/db"
+	"github.com/ditto-assistant/ditto-harness/pkg/db"
 	"github.com/ditto-assistant/ditto-harness/pkg/retrieval"
 	"github.com/ditto-assistant/ditto-harness/pkg/testpg"
 )

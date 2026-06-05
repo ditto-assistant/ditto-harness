@@ -11,10 +11,9 @@ The harness does not persist billing receipts or closed-source Ditto application
 - `pkg/agent`: importable multi-turn agent loop with injectable models/tools, stream-style event hooks, tool loop detection, and cost collection.
 - `pkg/chatv2`: importable chat harness facade that prepares memory context, combines injected tools with memory tools, runs the agent loop, returns cost data, and saves the resulting memory pair with seed/retrieval metadata.
 - `pkg/mcpserver`: MCP tools for `save_memory`, `search_memories`, `search_subjects`, `search_memories_in_subjects`, and `fetch_memories`.
-- `pkg/db`: public Postgres/sqlc adapter constructor for wiring `memory.Store` from an importing service.
+- `pkg/db`: generated Postgres/sqlc query package for wiring `memory.Store` from an importing service.
 - `pkg/harness`: shared content, memory, subject, usage, and tool types.
 - `pkg/testpg`: ephemeral PostgreSQL test helpers.
-- `internal/db`: minimal sqlc-style query layer over the harness schema.
 
 ## Database
 
@@ -26,7 +25,7 @@ The required Postgres schema is in `db/migrations`. It requires `pgvector` and k
 - `subject_memory_pair_links`
 - `retrieval_events`
 
-`db/query/memory.sql` is the source for the sqlc query surface. Generated code is checked in under `internal/sqlc`; `internal/db` is a private adapter with stable, friendlier harness types. Importing services should construct it through `pkg/db.New`.
+`db/query/memory.sql` is the source for the sqlc query surface. Generated code is checked in under `pkg/db` and can be constructed directly with `pkg/db.New`.
 
 ## Development
 
@@ -55,6 +54,7 @@ tools in the same agent loop while keeping closed-source Ditto tools outside
 this module.
 
 Memory search tools and MCP search handlers return slim preview objects by
-default. `fetch_memories` returns truncated full user/assistant text for the
-selected IDs. This keeps agent tool results token-efficient while still letting
-the host fetch detailed memory content when needed.
+default. `save_memory` accepts optional subject links, and `fetch_memories`
+returns truncated full user/assistant text for selected IDs. This keeps agent
+tool results token-efficient while still letting the host fetch detailed memory
+content when needed.

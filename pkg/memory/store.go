@@ -8,10 +8,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ditto-assistant/ditto-harness/internal/db"
+	"github.com/ditto-assistant/ditto-harness/pkg/db"
 	"github.com/ditto-assistant/ditto-harness/pkg/harness"
 	"github.com/ditto-assistant/ditto-harness/pkg/retrieval"
 	"github.com/google/uuid"
+	"github.com/omniaura/go-kit/convert/sqlconv/pgconv/pgdecode"
+	"github.com/omniaura/go-kit/convert/sqlconv/pgconv/pgencode"
+	"github.com/pgvector/pgvector-go"
 )
 
 var ErrNoEmbedder = errors.New("memory: embedder is required")
@@ -151,6 +154,10 @@ func (s *Store) SaveMemory(ctx context.Context, req SaveMemoryRequest) (harness.
 		return harness.Memory{}, fmt.Errorf("upsert user: %w", err)
 	}
 	offset := int32(req.TimezoneOffset)
+	timezoneOffset, err := pgencode.Int32Ptr(&offset).Int4()
+	if err != nil {
+		return harness.Memory{}, fmt.Errorf("encode timezone offset: %w", err)
+	}
 	row, err := s.q.CreateMemoryPair(ctx, db.CreateMemoryPairParams{
 		FirestorePairID:       req.ID,
 		UserID:                req.UserID,
@@ -164,11 +171,11 @@ func (s *Store) SaveMemory(ctx context.Context, req SaveMemoryRequest) (harness.
 		Output:                outputJSON,
 		Source:                req.Source,
 		SourceContext:         req.SourceContext,
-		Timestamp:             req.Timestamp,
-		TimezoneOffset:        &offset,
+		Timestamp:             pgencode.Time(req.Timestamp).Timestamptz(),
+		TimezoneOffset:        timezoneOffset,
 		SeedMemories:          seedJSON,
 		RetrievalMetadata:     metadataJSON,
-		ConversationEmbedding: embedding,
+		ConversationEmbedding: vectorValue(embedding),
 	})
 	if err != nil {
 		return harness.Memory{}, fmt.Errorf("create memory pair: %w", err)
@@ -188,12 +195,12 @@ func (s *Store) SaveMemory(ctx context.Context, req SaveMemoryRequest) (harness.
 				continue
 			}
 			srow, err := s.q.UpsertSubject(ctx, db.UpsertSubjectParams{
-				UserID:       req.UserID,
-				KgID:         req.KGID,
-				Text:         subj.Text,
-				Description:  subj.Description,
-				IsKeySubject: subj.Key,
-				Embedding:    embeddingAt(subjectEmbeddings, i),
+				UserID:          req.UserID,
+				KgID:            req.KGID,
+				SubjectText:     subj.Text,
+				DescriptionText: pgencode.String(subj.Description).EmptyIsNull().Text(),
+				IsKeySubject:    subj.Key,
+				Embedding:       vectorValue(embeddingAt(subjectEmbeddings, i)),
 			})
 			if err != nil {
 				return harness.Memory{}, fmt.Errorf("upsert subject %q: %w", subj.Text, err)
@@ -209,7 +216,7 @@ func (s *Store) SaveMemory(ctx context.Context, req SaveMemoryRequest) (harness.
 		}
 	}
 
-	return memoryFromDB(row), nil
+	return memoryFromCreate(row), nil
 }
 
 func (s *Store) SearchMemories(ctx context.Context, req SearchMemoriesRequest) ([]harness.Memory, error) {
@@ -234,19 +241,19 @@ func (s *Store) SearchMemories(ctx context.Context, req SearchMemoriesRequest) (
 	var out []harness.Memory
 	for _, embedding := range embeddings.Embeddings {
 		rows, err := s.q.SearchMemories(ctx, db.SearchMemoriesParams{
-			Embedding:      embedding,
+			Embedding:      vectorValue(embedding),
 			UserID:         req.UserID,
 			KgID:           req.KGID,
 			SessionID:      req.SessionID,
-			ExcludePairIDs: mapKeys(seen),
+			ExcludePairIds: mapKeys(seen),
 			MinSimilarity:  req.MinSimilarity,
-			Limit:          int32(req.Limit),
+			LimitCount:     int32(req.Limit),
 		})
 		if err != nil {
 			return nil, err
 		}
 		for _, row := range rows {
-			mem := memoryFromDB(row.MemoryPair)
+			mem := memoryFromSearch(row)
 			mem.Similarity = row.Similarity
 			if _, ok := seen[mem.ID]; ok {
 				continue
@@ -371,17 +378,17 @@ func (s *Store) SearchSubjects(ctx context.Context, req SearchSubjectsRequest) (
 	var out []harness.Subject
 	for _, embedding := range embeddings.Embeddings {
 		rows, err := s.q.SearchSubjects(ctx, db.SearchSubjectsParams{
-			Embedding:     embedding,
+			Embedding:     vectorValue(embedding),
 			UserID:        req.UserID,
 			KgID:          req.KGID,
 			MinSimilarity: req.MinSimilarity,
-			Limit:         int32(req.Limit),
+			LimitCount:    int32(req.Limit),
 		})
 		if err != nil {
 			return nil, err
 		}
 		for _, row := range rows {
-			subj := subjectFromDB(row)
+			subj := subjectFromSearch(row)
 			if _, ok := seen[subj.ID]; ok {
 				continue
 			}
@@ -415,17 +422,17 @@ func (s *Store) SearchMemoriesInSubjects(ctx context.Context, req SearchMemories
 			return nil, fmt.Errorf("parse subject id %q: %w", query.SubjectID, err)
 		}
 		rows, err := s.q.SearchMemoriesBySubject(ctx, db.SearchMemoriesBySubjectParams{
-			Embedding:     embeddingAt(embeddings, i),
-			SubjectID:     subjectID,
+			Embedding:     vectorValue(embeddingAt(embeddings, i)),
+			SubjectID:     pgencode.UUID(subjectID).UUID(),
 			UserID:        req.UserID,
 			MinSimilarity: req.MinSimilarity,
-			Limit:         int32(req.Limit),
+			LimitCount:    int32(req.Limit),
 		})
 		if err != nil {
 			return nil, err
 		}
 		for _, row := range rows {
-			mem := memoryFromDB(row.MemoryPair)
+			mem := memoryFromSubjectSearch(row)
 			mem.Similarity = row.Similarity
 			if _, ok := seen[mem.ID]; ok {
 				continue
@@ -438,13 +445,13 @@ func (s *Store) SearchMemoriesInSubjects(ctx context.Context, req SearchMemories
 }
 
 func (s *Store) FetchMemories(ctx context.Context, req FetchMemoriesRequest) ([]harness.Memory, error) {
-	rows, err := s.q.FetchMemories(ctx, req.UserID, req.PairIDs)
+	rows, err := s.q.FetchMemories(ctx, db.FetchMemoriesParams{UserID: req.UserID, PairIds: req.PairIDs})
 	if err != nil {
 		return nil, err
 	}
 	out := make([]harness.Memory, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, memoryFromDB(row))
+		out = append(out, memoryFromFetch(row))
 	}
 	return out, nil
 }
@@ -465,57 +472,199 @@ func (s *Store) embedTexts(ctx context.Context, texts []string) (harness.EmbedRe
 	return s.embedder.Embed(ctx, harness.EmbedRequest{Texts: clean})
 }
 
-func memoryFromDB(row db.MemoryPair) harness.Memory {
+type memoryRow struct {
+	id                    string
+	sourcePairID          string
+	userID                string
+	kgID                  string
+	sessionID             string
+	title                 string
+	description           string
+	prompt                string
+	response              string
+	input                 []byte
+	output                []byte
+	source                string
+	sourceContext         string
+	timestamp             time.Time
+	timezoneOffset        int
+	seedMemories          []byte
+	retrievalMetadata     []byte
+	conversationEmbedding []float32
+}
+
+func memoryFromCreate(row db.CreateMemoryPairRow) harness.Memory {
+	return memoryFromRow(memoryRow{
+		id:                    row.FirestorePairID,
+		sourcePairID:          pgdecode.UUID(row.ID).String(),
+		userID:                row.UserID,
+		kgID:                  row.KgID,
+		sessionID:             pgdecode.Text(row.SessionID).Value(),
+		title:                 pgdecode.Text(row.Title).Value(),
+		description:           pgdecode.Text(row.Description).Value(),
+		prompt:                pgdecode.Text(row.Prompt).Value(),
+		response:              pgdecode.Text(row.Response).Value(),
+		input:                 row.Input,
+		output:                row.Output,
+		source:                pgdecode.Text(row.Source).Value(),
+		sourceContext:         pgdecode.Text(row.SourceContext).Value(),
+		timestamp:             pgdecode.Timestamptz(row.Timestamp).Value(),
+		timezoneOffset:        int(pgdecode.Int4(row.TimezoneOffset).Value()),
+		seedMemories:          row.SeedMemories,
+		retrievalMetadata:     row.RetrievalMetadata,
+		conversationEmbedding: row.ConversationEmbedding.Slice(),
+	})
+}
+
+func memoryFromFetch(row db.FetchMemoriesRow) harness.Memory {
+	return memoryFromRow(memoryRow{
+		id:                    row.FirestorePairID,
+		sourcePairID:          pgdecode.UUID(row.ID).String(),
+		userID:                row.UserID,
+		kgID:                  row.KgID,
+		sessionID:             pgdecode.Text(row.SessionID).Value(),
+		title:                 pgdecode.Text(row.Title).Value(),
+		description:           pgdecode.Text(row.Description).Value(),
+		prompt:                pgdecode.Text(row.Prompt).Value(),
+		response:              pgdecode.Text(row.Response).Value(),
+		input:                 row.Input,
+		output:                row.Output,
+		source:                pgdecode.Text(row.Source).Value(),
+		sourceContext:         pgdecode.Text(row.SourceContext).Value(),
+		timestamp:             pgdecode.Timestamptz(row.Timestamp).Value(),
+		timezoneOffset:        int(pgdecode.Int4(row.TimezoneOffset).Value()),
+		seedMemories:          row.SeedMemories,
+		retrievalMetadata:     row.RetrievalMetadata,
+		conversationEmbedding: row.ConversationEmbedding.Slice(),
+	})
+}
+
+func memoryFromRecent(row db.ListRecentMemoriesRow) harness.Memory {
+	return memoryFromRow(memoryRow{
+		id:                    row.FirestorePairID,
+		sourcePairID:          pgdecode.UUID(row.ID).String(),
+		userID:                row.UserID,
+		kgID:                  row.KgID,
+		sessionID:             pgdecode.Text(row.SessionID).Value(),
+		title:                 pgdecode.Text(row.Title).Value(),
+		description:           pgdecode.Text(row.Description).Value(),
+		prompt:                pgdecode.Text(row.Prompt).Value(),
+		response:              pgdecode.Text(row.Response).Value(),
+		input:                 row.Input,
+		output:                row.Output,
+		source:                pgdecode.Text(row.Source).Value(),
+		sourceContext:         pgdecode.Text(row.SourceContext).Value(),
+		timestamp:             pgdecode.Timestamptz(row.Timestamp).Value(),
+		timezoneOffset:        int(pgdecode.Int4(row.TimezoneOffset).Value()),
+		seedMemories:          row.SeedMemories,
+		retrievalMetadata:     row.RetrievalMetadata,
+		conversationEmbedding: row.ConversationEmbedding.Slice(),
+	})
+}
+
+func memoryFromSearch(row db.SearchMemoriesRow) harness.Memory {
+	return memoryFromRow(memoryRow{
+		id:                    row.FirestorePairID,
+		sourcePairID:          pgdecode.UUID(row.ID).String(),
+		userID:                row.UserID,
+		kgID:                  row.KgID,
+		sessionID:             pgdecode.Text(row.SessionID).Value(),
+		title:                 pgdecode.Text(row.Title).Value(),
+		description:           pgdecode.Text(row.Description).Value(),
+		prompt:                pgdecode.Text(row.Prompt).Value(),
+		response:              pgdecode.Text(row.Response).Value(),
+		input:                 row.Input,
+		output:                row.Output,
+		source:                pgdecode.Text(row.Source).Value(),
+		sourceContext:         pgdecode.Text(row.SourceContext).Value(),
+		timestamp:             pgdecode.Timestamptz(row.Timestamp).Value(),
+		timezoneOffset:        int(pgdecode.Int4(row.TimezoneOffset).Value()),
+		seedMemories:          row.SeedMemories,
+		retrievalMetadata:     row.RetrievalMetadata,
+		conversationEmbedding: row.ConversationEmbedding.Slice(),
+	})
+}
+
+func memoryFromSubjectSearch(row db.SearchMemoriesBySubjectRow) harness.Memory {
+	return memoryFromRow(memoryRow{
+		id:                    row.FirestorePairID,
+		sourcePairID:          pgdecode.UUID(row.ID).String(),
+		userID:                row.UserID,
+		kgID:                  row.KgID,
+		sessionID:             pgdecode.Text(row.SessionID).Value(),
+		title:                 pgdecode.Text(row.Title).Value(),
+		description:           pgdecode.Text(row.Description).Value(),
+		prompt:                pgdecode.Text(row.Prompt).Value(),
+		response:              pgdecode.Text(row.Response).Value(),
+		input:                 row.Input,
+		output:                row.Output,
+		source:                pgdecode.Text(row.Source).Value(),
+		sourceContext:         pgdecode.Text(row.SourceContext).Value(),
+		timestamp:             pgdecode.Timestamptz(row.Timestamp).Value(),
+		timezoneOffset:        int(pgdecode.Int4(row.TimezoneOffset).Value()),
+		seedMemories:          row.SeedMemories,
+		retrievalMetadata:     row.RetrievalMetadata,
+		conversationEmbedding: row.ConversationEmbedding.Slice(),
+	})
+}
+
+func memoryFromRow(row memoryRow) harness.Memory {
 	var input, output []harness.Content
 	var seed []harness.SeedMemoryNode
 	var metadata *harness.RetrievalMetadata
-	_ = json.Unmarshal(row.Input, &input)
-	_ = json.Unmarshal(row.Output, &output)
-	_ = json.Unmarshal(row.SeedMemories, &seed)
-	if len(row.RetrievalMetadata) > 0 && string(row.RetrievalMetadata) != "null" {
+	_ = json.Unmarshal(row.input, &input)
+	_ = json.Unmarshal(row.output, &output)
+	_ = json.Unmarshal(row.seedMemories, &seed)
+	if len(row.retrievalMetadata) > 0 && string(row.retrievalMetadata) != "null" {
 		var md harness.RetrievalMetadata
-		if json.Unmarshal(row.RetrievalMetadata, &md) == nil {
+		if json.Unmarshal(row.retrievalMetadata, &md) == nil {
 			metadata = &md
 		}
 	}
-	offset := 0
-	if row.TimezoneOffset != nil {
-		offset = int(*row.TimezoneOffset)
-	}
 	return harness.Memory{
-		ID:                row.FirestorePairID,
-		SourcePairID:      row.ID.String(),
-		UserID:            row.UserID,
-		KGID:              row.KgID,
-		SessionID:         row.SessionID,
-		Title:             row.Title,
-		Summary:           row.Description,
-		Prompt:            row.Prompt,
-		Response:          row.Response,
+		ID:                row.id,
+		SourcePairID:      row.sourcePairID,
+		UserID:            row.userID,
+		KGID:              row.kgID,
+		SessionID:         row.sessionID,
+		Title:             row.title,
+		Summary:           row.description,
+		Prompt:            row.prompt,
+		Response:          row.response,
 		Input:             input,
 		Output:            output,
-		Source:            row.Source,
-		SourceContext:     row.SourceContext,
-		Timestamp:         row.Timestamp,
-		TimezoneOffset:    offset,
+		Source:            row.source,
+		SourceContext:     row.sourceContext,
+		Timestamp:         row.timestamp,
+		TimezoneOffset:    row.timezoneOffset,
 		SeedMemories:      seed,
 		RetrievalMetadata: metadata,
-		Embedding:         row.ConversationEmbedding,
+		Embedding:         row.conversationEmbedding,
 	}
 }
 
-func subjectFromDB(row db.Subject) harness.Subject {
+func subjectFromSearch(row db.SearchSubjectsRow) harness.Subject {
 	return harness.Subject{
-		ID:          row.ID.String(),
+		ID:          pgdecode.UUID(row.ID).String(),
 		UserID:      row.UserID,
 		KGID:        row.KgID,
-		Text:        row.Text,
-		Description: row.Description,
+		Text:        row.SubjectText,
+		Description: pgdecode.Text(row.DescriptionText).Value(),
 		Key:         row.IsKeySubject,
-		Embedding:   row.Embedding,
+		Embedding:   row.Embedding.Slice(),
 		Similarity:  row.Similarity,
-		MemoryCount: row.MemoryPairCount,
+		MemoryCount: row.MemoryCount,
 	}
+}
+
+func vectorValue(v []float32) pgvector.Vector {
+	if len(v) == 0 {
+		return pgvector.Vector{}
+	}
+	if len(v) != 768 {
+		panic(fmt.Sprintf("embedding dimension = %d, want 768", len(v)))
+	}
+	return pgvector.NewVector(v)
 }
 
 func firstEmbedding(resp harness.EmbedResponse) []float32 {
