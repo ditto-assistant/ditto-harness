@@ -24,13 +24,14 @@ The required Postgres schema is in `db/migrations`. It requires `pgvector` and k
 - `subject_memory_pair_links`
 - `retrieval_events`
 
-`db/query/memory.sql` is the source for the sqlc query surface. The generated-compatible Go wrapper in `internal/db` is kept small so the backend can import the public packages without taking Ditto backend dependencies.
+`db/query/memory.sql` is the source for the sqlc query surface. Generated code is checked in under `internal/sqlc`; `internal/db` is a small adapter with stable, friendlier harness types.
 
 ## Development
 
 Run:
 
 ```sh
+go tool sqlc generate -f sqlc.yaml
 go test ./...
 ```
 
