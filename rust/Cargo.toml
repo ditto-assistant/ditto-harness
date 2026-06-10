@@ -1,0 +1,40 @@
+[workspace]
+resolver = "2"
+members = ["crates/harness", "crates/cli", "crates/node"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/ditto-assistant/ditto-harness"
+
+[workspace.dependencies]
+# Database (Turso DB, SQLite-family, async)
+turso = "0.7.0-pre.6"
+# LLM providers
+rig-core = "0.38.2"
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# IDs / time
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+# Errors
+thiserror = "2"
+anyhow = "1"
+# Traits / CLI / logging / HTTP
+async-trait = "0.1"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+reqwest = { version = "0.12", features = ["json"] }
+futures = "0.3"
+# Node bindings
+napi = { version = "3", default-features = false, features = ["napi8", "async"] }
+napi-derive = "3"
+napi-build = "2"
+# Test helpers
+tempfile = "3"
+# Internal
+ditto-harness = { path = "crates/harness" }

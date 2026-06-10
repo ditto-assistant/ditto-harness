@@ -1,0 +1,23 @@
+[package]
+name = "ditto-harness-node"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Node.js (napi-rs) bindings for the ditto-harness agent memory harness."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+ditto-harness = { workspace = true }
+napi = { workspace = true, features = ["serde-json", "dyn-symbols"] }
+napi-derive = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+async-trait = { workspace = true }
+
+[build-dependencies]
+napi-build = { workspace = true }

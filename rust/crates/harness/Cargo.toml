@@ -1,0 +1,25 @@
+[package]
+name = "ditto-harness"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Open-source agent memory harness: memory storage/retrieval with vector search, memory tools, an agent loop, and a chat facade."
+
+[dependencies]
+turso = { workspace = true }
+rig-core = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+reqwest = { workspace = true }
+futures = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+anyhow = { workspace = true }

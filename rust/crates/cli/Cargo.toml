@@ -1,0 +1,23 @@
+[package]
+name = "ditto-harness-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CLI for the ditto-harness agent memory harness."
+
+[[bin]]
+name = "ditto-harness"
+path = "src/main.rs"
+
+[dependencies]
+ditto-harness = { workspace = true }
+turso = { workspace = true }
+serde = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+futures = { workspace = true }

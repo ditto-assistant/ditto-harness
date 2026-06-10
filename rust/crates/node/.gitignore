@@ -1,0 +1,3 @@
+# Build artifacts (index.js and index.d.ts ARE checked in)
+node_modules/
+*.node
