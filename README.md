@@ -4,6 +4,34 @@ Ditto Harness is the open-source memory and agent harness extracted from Ditto b
 
 The harness does not persist billing receipts or closed-source Ditto application features. It does expose usage and cost data so an importing service can store or bill for it separately.
 
+## Two implementations
+
+`main` contains two parallel implementations of the harness:
+
+- **Go** (repo root: `pkg/…`, Postgres + pgvector) — the original extraction, documented under "Go packages" below.
+- **Rust** (`rust/`) — a portable rewrite backed by **embedded Turso/SQLite with native vector search** (no external database), plus `rig-core` model/embedder clients and NAPI Node bindings. This is what the **[`dittobench-starter-kit`](https://github.com/ditto-assistant/dittobench-starter-kit)** (Bittensor SN118 miner harness) depends on as a git crate.
+
+### Rust crate (`rust/crates/harness`)
+
+Cargo workspace under `rust/`:
+
+- `crates/harness` — the library: `chat::Harness` (prepare → agent loop → save), `memory::Store` (ingest, vector + composite search, subjects), `retrieval` (composite V1/V2 scoring, the learned-weight `MlpPredictor`, and an optional second-stage `Reranker` hook), `models` (Ollama / OpenRouter / vLLM via `rig-core`), and `db` (embedded Turso schema + queries).
+- `crates/cli`, `crates/node` — a CLI and NAPI bindings over the library.
+
+The Rust retrieval pipeline mirrors the Go production ranker 1:1: vector candidate pool → composite V2 (7 signals + scale) with MLP-predicted fusion weights → optional cross-encoder rerank (via the `Reranker` trait; the concrete ONNX model lives in the consuming crate so this crate stays inference-runtime-free).
+
+```sh
+cd rust && cargo build && cargo test
+```
+
+Depend on it from another crate (pin a `main` commit for reproducible builds):
+
+```toml
+ditto-harness = { git = "https://github.com/ditto-assistant/ditto-harness", rev = "<main-commit>" }
+```
+
+---
+
 ## Packages
 
 - `pkg/memory`: memory ingestion, fetch, vector search, composite search, subject search, subject-scoped memory search, slim memory tool payloads, retrieval metadata, and prompt context.

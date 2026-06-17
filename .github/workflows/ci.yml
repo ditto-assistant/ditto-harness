@@ -1,9 +1,12 @@
 name: ci
 
+# Manual-only for now: the org's GitHub Actions budget is exhausted, so
+# push/PR-triggered runs fail to start ("Actions budget is preventing further
+# use") and show a spurious red X. Run on demand via the Actions tab. To restore
+# automatic CI, raise the Actions spending limit in org Settings → Billing, then
+# re-add the `push`/`pull_request` triggers below.
 on:
-  push:
-    branches: [main]
-  pull_request:
+  workflow_dispatch:
 
 jobs:
   test:
