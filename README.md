@@ -86,3 +86,10 @@ default. `save_memory` accepts optional subject links, and `fetch_memories`
 returns truncated full user/assistant text for selected IDs. This keeps agent
 tool results token-efficient while still letting the host fetch detailed memory
 content when needed.
+
+## License
+
+**Dual-licensed** (see [`LICENSING.md`](LICENSING.md)): open source under
+**GNU AGPL-3.0-or-later** ([`LICENSE`](LICENSE)), or a **commercial/partner
+license** from Ditto Assistant for closed-source / proprietary / hosted use
+without AGPL obligations.
