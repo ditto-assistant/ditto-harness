@@ -45,6 +45,7 @@ pub struct Store {
     db: Arc<Db>,
     embedder: Arc<dyn Embedder>,
     predictor: Option<Arc<dyn WeightPredictor>>,
+    reranker: Option<Arc<dyn retrieval::Reranker>>,
 }
 
 /// Constructor options for [`Store::new`] (Go: `memory.Options`).
@@ -54,6 +55,9 @@ pub struct StoreOptions {
     pub embedder: Arc<dyn Embedder>,
     /// `None` -> default weights + "semantic" intent in composite search.
     pub predictor: Option<Arc<dyn WeightPredictor>>,
+    /// Optional second-stage reranker applied to the composite pool. `None` ->
+    /// composite order is returned as-is (Go production: cross-encoder rerank).
+    pub reranker: Option<Arc<dyn retrieval::Reranker>>,
 }
 
 /// Subject attached to a saved memory (Go: `SubjectInput`). Tool args use
@@ -183,6 +187,7 @@ impl Store {
             db: opts.db,
             embedder: opts.embedder,
             predictor: opts.predictor,
+            reranker: opts.reranker,
         }
     }
 
@@ -336,8 +341,17 @@ impl Store {
         if req.limit == 0 {
             req.limit = DEFAULT_SEARCH_LIMIT;
         }
+        // When a reranker is set, retrieve a WIDER composite pool, rerank it,
+        // then truncate to the caller's limit (Go production: retrieveLimit =
+        // max(rootCount, ceRerankPoolSize)).
+        let requested_limit = req.limit;
+        let pool_limit = if self.reranker.is_some() {
+            retrieval::RERANK_POOL_SIZE.max(requested_limit)
+        } else {
+            requested_limit
+        };
         if req.candidate_pool_size == 0 {
-            req.candidate_pool_size = 32.max(req.limit * 4);
+            req.candidate_pool_size = 32.max(pool_limit * 4);
         }
         let embed_resp = self.embed_texts(std::slice::from_ref(&req.query)).await?;
         let embedding = embedding_at(&embed_resp, 0).unwrap_or_default();
@@ -366,7 +380,7 @@ impl Store {
                 session_id: req.session_id.clone(),
                 current_session_id: req.session_id.clone(),
                 min_timestamp: None,
-                limit: req.limit,
+                limit: pool_limit,
                 candidate_pool_size: req.candidate_pool_size,
                 exclude_pair_ids: req.exclude_pair_ids.clone(),
                 weights,
@@ -400,6 +414,16 @@ impl Store {
             }
         }
 
+        // Second stage: rerank the composite pool, then truncate to the
+        // caller's limit (Go production: cross-encoder rerank + RRF fusion).
+        // `memories` arrive ordered best-first by composite score.
+        if let Some(reranker) = &self.reranker {
+            memories = reranker
+                .rerank(&req.query, memories, requested_limit)
+                .await?;
+        }
+        let retrieved_pair_ids: Vec<String> = memories.iter().map(|m| m.id.clone()).collect();
+
         let mut weight_map = std::collections::BTreeMap::new();
         weight_map.insert("cosine".to_string(), weights.cosine);
         weight_map.insert("recencyLinear".to_string(), weights.recency_linear);
@@ -414,7 +438,7 @@ impl Store {
             weights: weight_map,
             scale: weights.scale,
             variant: req.variant.to_string(),
-            retrieved_pair_ids: pair_ids,
+            retrieved_pair_ids,
             query_embedding_model: "host".to_string(),
         };
         Ok((memories, Some(metadata)))
@@ -676,6 +700,7 @@ pub(crate) mod test_support {
             db: Arc::new(db),
             embedder: Arc::new(HashEmbedder),
             predictor: None,
+            reranker: None,
         })
     }
 }

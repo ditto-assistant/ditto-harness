@@ -189,6 +189,33 @@ pub trait WeightPredictor: Send + Sync {
     async fn predict(&self, features: &Features) -> Result<Weights>;
 }
 
+/// Default size of the candidate pool handed to a [`Reranker`] before
+/// truncating to the caller's limit (Go production: `ceRerankPoolSize = 20`).
+pub const RERANK_POOL_SIZE: usize = 20;
+
+/// Second-stage reranker applied to the composite-ordered candidate pool
+/// (Go production: the cross-encoder rerank in `pkg/services/retrieval/crossencoder`).
+///
+/// Mirrors the production pipeline shape: composite retrieval widens the pool to
+/// [`RERANK_POOL_SIZE`], the reranker reorders it against `query`, and the result
+/// is truncated to `top_n`. Implementations own their relevance model and how it
+/// fuses with the incoming composite order (production uses Reciprocal Rank
+/// Fusion of cross-encoder rank with composite rank). `pool` arrives ordered
+/// best-first by composite score; the returned vec must be best-first and at most
+/// `top_n` long.
+///
+/// The concrete model (e.g. an ONNX cross-encoder + tokenizer + weights) lives in
+/// the consuming crate so this crate stays free of an inference runtime.
+#[async_trait]
+pub trait Reranker: Send + Sync {
+    async fn rerank(
+        &self,
+        query: &str,
+        pool: Vec<crate::types::Memory>,
+        top_n: usize,
+    ) -> Result<Vec<crate::types::Memory>>;
+}
+
 /// A predictor that always returns fixed weights (Go: `StaticPredictor`).
 /// Zero weights fall back to [`default_weights`].
 #[derive(Debug, Clone, Copy, Default)]

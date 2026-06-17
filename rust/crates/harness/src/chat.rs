@@ -629,6 +629,7 @@ mod tests {
             db: Arc::new(db),
             embedder: Arc::new(HashEmbedder),
             predictor: None,
+            reranker: None,
         }));
 
         store

@@ -900,6 +900,7 @@ mod tests {
             db: Arc::clone(&db),
             embedder: Arc::clone(&embedder),
             predictor: None,
+            reranker: None,
         }));
         let model: Arc<dyn Model> = Arc::new(ScriptedModel { script, fallback });
         (Dreamer::new(store, model, embedder), db)
@@ -1207,6 +1208,7 @@ mod tests {
             db: Arc::clone(&db),
             embedder: Arc::clone(&embedder),
             predictor: None,
+            reranker: None,
         }));
         let model = ChatModelConfig::ollama("", &chat_model)
             .build()
