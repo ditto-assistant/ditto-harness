@@ -4,7 +4,7 @@
 //! Ports the Postgres schema from `db/migrations/000001_memory_schema.up.sql`
 //! and the sqlc queries from `db/query/memory.sql` to Turso's SQLite dialect.
 //!
-//! Schema mapping decisions (see `rust/NOTES.md` for the spike verdict):
+//! Schema mapping decisions (see `NOTES.md` for the spike verdict):
 //! - `UUID` PKs -> `TEXT`, uuid v4 generated in Rust ([`new_row_id`]).
 //! - `BIGSERIAL` -> `INTEGER PRIMARY KEY AUTOINCREMENT`.
 //! - `TIMESTAMPTZ` -> `TEXT`, UTC RFC3339 via [`format_timestamp`] (fixed

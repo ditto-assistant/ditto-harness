@@ -41,56 +41,30 @@ retroactively.
 
 ## Development Setup
 
-### Go (primary implementation)
-
-Requirements: Go 1.22+, `sqlc` (installed as a Go tool in `go.mod`).
-
-```sh
-# Regenerate the sqlc query package (required after editing db/query/*.sql)
-go tool sqlc generate -f sqlc.yaml
-
-# Run all tests (unit tests run without Postgres; integration tests skip
-# automatically when DITTO_HARNESS_TEST_DATABASE_URL is unset)
-go test ./...
-
-# Run integration tests (requires a Postgres instance with pgvector)
-DITTO_HARNESS_TEST_DATABASE_URL=postgres://user:pass@localhost:5432/dbname \
-  go test ./...
-```
-
-The generated `pkg/db` package is checked in. Always run `sqlc generate` and
-commit the result alongside any SQL changes.
-
-### Rust (portable rewrite)
-
 Requirements: Rust stable toolchain, `cargo`.
 
 ```sh
-cd rust
 cargo build
 cargo test
 ```
 
-The Rust crate lives in `rust/crates/harness` (library), `rust/crates/cli`
-(CLI), and `rust/crates/node` (NAPI bindings).
+The workspace crates live at:
+
+- `crates/harness` — the library
+- `crates/cli` — the command-line interface
+- `crates/node` — Node.js NAPI bindings
+
+Some integration tests (for example Ollama-backed tests) are gated behind
+environment variables and skip automatically when those variables are unset.
 
 ---
 
 ## Code Style
 
-### Go
-
-- Follow standard Go conventions (`gofmt`, `go vet`).
-- Keep packages focused; avoid adding dependencies to `go.mod` without
-  discussion.
-- New public APIs should have at least one example test (`Example*` function).
-
-### Rust
-
 - Follow `rustfmt` defaults (`cargo fmt`).
-- Run `cargo clippy` and address warnings before opening a PR.
-- Mirror the Go package structure where applicable (the Rust port is intended
-  to be a 1:1 functional equivalent).
+- Run `cargo clippy --workspace --all-targets -- -D warnings` and address
+  warnings before opening a PR.
+- Keep packages focused; avoid adding new dependencies without discussion.
 
 ---
 
@@ -98,10 +72,11 @@ The Rust crate lives in `rust/crates/harness` (library), `rust/crates/cli`
 
 1. Fork the repository and create a feature branch from `main`.
 2. Make your changes with clear, focused commits.
-3. Ensure all tests pass (`go test ./...` and/or `cargo test`).
-4. Open a pull request against `main`.
-5. Sign the CLA when prompted by the bot.
-6. Address review feedback.
+3. Ensure the workspace builds and tests pass (`cargo build`, `cargo test`).
+4. Run `cargo fmt --check` and `cargo clippy`.
+5. Open a pull request against `main`.
+6. Sign the CLA when prompted by the bot.
+7. Address review feedback.
 
 PRs that add new public API surface, change the database schema, or affect the
 retrieval pipeline should include updated tests and, where appropriate, updated
