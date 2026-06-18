@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Shared helpers for the subcommand handlers: opening the store, building
 //! chat models and embedders from the global flags, and printing summaries.
 

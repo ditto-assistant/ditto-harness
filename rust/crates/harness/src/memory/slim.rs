@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Slim, token-efficient memory payloads for tool results.
 //! Port of Go `pkg/memory/slim.go`.
 

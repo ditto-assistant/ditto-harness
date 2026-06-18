@@ -89,7 +89,22 @@ content when needed.
 
 ## License
 
-**Dual-licensed** (see [`LICENSING.md`](LICENSING.md)): open source under
-**GNU AGPL-3.0-or-later** ([`LICENSE`](LICENSE)), or a **commercial/partner
-license** from Ditto Assistant for closed-source / proprietary / hosted use
-without AGPL obligations.
+ditto-harness is **dual-licensed** under:
+
+- **GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later)** —
+  see [`LICENSE`](LICENSE). Free to use for open-source and AGPL-compatible
+  projects. The AGPL closes the "SaaS loophole": anyone who runs a modified
+  version as a network service must publish their complete corresponding source
+  to users of that service.
+
+- **Commercial License** — see [`LICENSE-COMMERCIAL.md`](LICENSE-COMMERCIAL.md).
+  For organizations that cannot comply with the AGPL (closed-source products,
+  proprietary SaaS, embedded use without copyleft obligations). Contact
+  [licensing@omniaura.ai](mailto:licensing@omniaura.ai).
+
+See [`LICENSING.md`](LICENSING.md) for a plain-language explanation and a
+"Do I need a commercial license?" decision guide.
+
+**Contributors:** All contributors must sign the
+[Contributor License Agreement](CLA.md) before their PR can be merged.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for details.

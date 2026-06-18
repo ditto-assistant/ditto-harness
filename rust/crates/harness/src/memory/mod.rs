@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Memory store: ingestion, fetch, vector search, composite search, subject
 //! search, subject-scoped memory search, prompt context, and slim payloads.
 //! Port of Go `pkg/memory`.

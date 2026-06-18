@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Core shared types, traits, and errors ported from Go `pkg/harness/types.go`
 //! (plus the tiny cost collector from `pkg/cost`).
 //!

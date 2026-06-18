@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Turso (SQLite-family) database layer.
 //!
 //! Ports the Postgres schema from `db/migrations/000001_memory_schema.up.sql`

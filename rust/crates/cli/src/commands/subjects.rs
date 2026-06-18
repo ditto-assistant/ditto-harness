@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! `subjects` subcommand: search the subject graph and print subjects with
 //! descriptions, key flags, and memory counts.
 

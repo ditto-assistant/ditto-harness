@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Prompt memory context: long/short-term retrieval bundling and the JSON
 //! payload injected into the system prompt. Port of Go
 //! `pkg/memory/prompt_context.go` + `pkg/memory/prompt_memories.go`.

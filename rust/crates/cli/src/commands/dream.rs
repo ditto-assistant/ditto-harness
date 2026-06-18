@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! `dream` subcommand: run the subject extraction/consolidation pipeline for
 //! the user, print the `DreamReport`, then list the user's subject graph
 //! (names, key flags, link counts) so the new subjects are visible.

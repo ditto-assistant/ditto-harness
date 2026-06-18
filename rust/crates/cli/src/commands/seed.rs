@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! `seed` subcommand: ingest memories from a JSON file (array of
 //! `{id?, prompt, response, summary?, sessionId?, daysAgo?, subjects?}`
 //! objects) or built-in sample data for the fictional engineer "Quinn",
