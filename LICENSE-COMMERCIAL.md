@@ -1,16 +1,3 @@
-<!--
-  TEMPLATE — PENDING IP-ATTORNEY REVIEW
-  ======================================
-  This document is a commercial license template provided for informational
-  purposes only. It is NOT a legally binding agreement and does NOT constitute
-  legal advice. Final commercial license terms are subject to negotiation and
-  must be executed as a signed written agreement between the licensee and
-  Omni Aura LLC. Consult a qualified intellectual-property attorney before
-  relying on any terms herein.
-
-  To inquire about a commercial license: licensing@omniaura.ai
--->
-
 # Commercial License — ditto-harness
 
 **Licensor:** Omni Aura LLC, a Wyoming limited liability company
@@ -143,7 +130,7 @@ or substantially all of its assets.
 
 *(Placeholder: [PAYMENT TERMS — e.g., "License Fee of $[AMOUNT] due within
 30 days of Agreement execution; annual renewal invoiced 30 days before renewal
-date."]*
+date."])*
 
 Failure to pay the License Fee within [CURE PERIOD] days of the due date
 constitutes a material breach and may result in termination under Section 9.

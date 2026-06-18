@@ -1,12 +1,3 @@
-<!--
-  PENDING ATTORNEY REVIEW
-  =======================
-  This Contributor License Agreement is a template provided for informational
-  purposes. It is NOT a substitute for legal advice. Omni Aura LLC recommends
-  review by a qualified intellectual-property attorney before enforcing or
-  relying on these terms.
--->
-
 # Contributor License Agreement (CLA)
 
 **Project:** ditto-harness
@@ -38,9 +29,13 @@ of an employer or other legal entity).*
 - **"Contribution"** means any original work of authorship, including any
   modifications or additions to an existing work, that you intentionally submit
   to Omni Aura LLC for inclusion in ditto-harness.
-- **"Submit"** means any form of electronic, verbal, or written communication
-  sent to Omni Aura LLC or its representatives, including pull requests, issues,
-  and communications on mailing lists or chat platforms.
+- **"Submit"** means to intentionally offer a Contribution for inclusion in
+  ditto-harness — for example, by opening a pull request or sending a patch or
+  commit. Routine project communications that are not intended for inclusion in
+  the project (such as questions, bug reports, feature requests, or discussion
+  on issues, mailing lists, or chat platforms) are **not** a Submission and do
+  **not** trigger the copyright or patent license grants in this CLA, unless
+  they contain a Contribution that you intentionally offer for inclusion.
 
 ### 2. Copyright License Grant
 
