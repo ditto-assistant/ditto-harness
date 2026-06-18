@@ -1,6 +1,6 @@
 # Rust Harness End-to-End Verification
 
-Date: 2026-06-10. Run from `/Users/peyton/code/ditto/ditto-harness/rust` on macOS (Darwin 25.4.0).
+Date: 2026-06-10. Run from `/Users/peyton/code/ditto/ditto-harness (repo root)` on macOS (Darwin 25.4.0).
 
 ## Environment pre-flight
 

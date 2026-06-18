@@ -16,7 +16,7 @@ VERDICT: **native**. turso 0.7.0-pre.6 (`Builder::new_local(":memory:")`) suppor
 No errors on any step. Schema therefore uses `F32_BLOB(768)` columns with
 `vector_distance_cos()` for search; HNSW indexes are skipped (brute-force scan
 per user). The spike lives on as permanent tests in
-`rust/crates/harness/src/db/mod.rs` (`#[cfg(test)] mod tests`), which also
+`crates/harness/src/db/mod.rs` (`#[cfg(test)] mod tests`), which also
 probe blob-parameter binding, `ON CONFLICT ... DO UPDATE`, and `RETURNING`
 support (results recorded below once measured).
 
@@ -38,7 +38,7 @@ All supported by turso 0.7.0-pre.6 — verified by passing tests:
 
 ### Workspace scaffold (Scaffold phase)
 
-`rust/` is a 3-crate workspace: `crates/harness` (lib, all public signatures
+the repository root is a 3-crate workspace: `crates/harness` (lib, all public signatures
 stubbed with `todo!()`), `crates/cli` (clap skeleton; handlers in
 `crates/cli/src/commands/*.rs`), `crates/node` (napi-rs cdylib stub).
 `cargo check --workspace` and `cargo test -p ditto-harness` pass.
