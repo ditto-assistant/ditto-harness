@@ -30,6 +30,13 @@
 # CLA DOCUMENT:
 # =============
 # The CLA text is in CLA.md at the root of this repository.
+#
+# ALLOWLIST:
+# ==========
+# Omni Aura maintainers/employees are allowlisted: their contributions are
+# already owned by Omni Aura LLC (via employment / IP-assignment agreements),
+# so the CLA's inbound rights grant is redundant for them. Outside contributors
+# and contractors (without an IP-assignment clause) must still sign.
 
 name: CLA Assistant
 
@@ -76,10 +83,11 @@ jobs:
           # Branch used to store CLA signatures. Created automatically.
           branch: cla-signatures
 
-          # The text contributors must comment to record their agreement.
-          # Must match exactly (case-insensitive) what the bot instructs them
-          # to type.
-          allowlist: bot*
+          # Contributors who are exempt from signing. Omni Aura
+          # owners/employees are listed here because their contributions are
+          # already owned by the company; bots never sign. Outside
+          # contributors and contractors must still sign.
+          allowlist: Peyton-Spencer,omarzanji,AlanGOmniAura,MeepCoding20,nicktallen,Tetramputechture,bot*
 
           # Custom message posted on the PR when a contributor has not yet
           # signed the CLA.
