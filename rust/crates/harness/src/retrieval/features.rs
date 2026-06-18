@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Auxiliary feature extraction for the learned-weight predictor.
 //! Port of Go `pkg/retrieval/features.go`.
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Node.js bindings for ditto-harness (napi-rs v3).
 //!
 //! Deliberately JSON-heavy: memories, subjects, and dream reports cross the

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Memory tools exposed to the agent loop (and MCP hosts).
 //! Port of Go `pkg/memory/tools.go`.
 //!

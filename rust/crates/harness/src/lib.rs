@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! ditto-harness: open-source agent memory harness (Rust port of the Go
 //! original). Stores and retrieves agent memories with vector search, exposes
 //! memory tools, an importable agent loop, and a chat facade.

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Importable multi-turn agent loop with injectable model/tools, stream-style
 //! event hooks, tool loop detection, and cost collection.
 //! Port of Go `pkg/agent`.

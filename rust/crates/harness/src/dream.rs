@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Dream pipeline: offline subject extraction/consolidation over a user's
 //! stored memories, locally verifiable with Ollama (gemma3:4b +
 //! embeddinggemma). New module — a scaled-down local port of Ditto's

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Detection of repeated identical tool calls.
 //! Port of Go `pkg/agent/loopdetect`.
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Loadable learned-weight MLP predictor. Port of Go `pkg/retrieval/mlp.go`.
 //!
 //! Binary artifact format (all little-endian):

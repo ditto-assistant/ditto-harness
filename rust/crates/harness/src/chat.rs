@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Chat harness facade: prepares memory context, combines injected tools with
 //! memory tools, runs the agent loop, and saves the resulting memory pair.
 //! Port of Go `pkg/chatv2`.

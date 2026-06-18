@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Model and embedder providers: Ollama plus OpenAI-compatible endpoints
 //! (vLLM, OpenRouter), bridged to the [`Model`]/[`Embedder`] traits via
 //! rig-core. New module (no direct Go counterpart; Go hosts inject their own

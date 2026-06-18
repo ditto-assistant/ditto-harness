@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! ditto-harness CLI: seed/dream/search/subjects/chat against a local Turso
 //! database with Ollama / OpenRouter / vLLM model providers.
 //!
