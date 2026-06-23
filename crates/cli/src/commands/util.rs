@@ -39,6 +39,7 @@ pub(crate) async fn open_store(common: &Common) -> anyhow::Result<Arc<Store>> {
         db: Arc::new(db),
         embedder: Arc::new(build_embedder(common)),
         predictor: None,
+        reranker: None,
     })))
 }
 
