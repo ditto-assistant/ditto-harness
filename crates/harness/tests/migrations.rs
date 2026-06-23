@@ -82,3 +82,41 @@ async fn migrations_persist_and_reopen_is_a_noop() {
         "user inserted before reopen must survive"
     );
 }
+
+/// Many `Db::open` calls racing on the same fresh file must all succeed, and the
+/// ledger must end with exactly one row per migration — i.e. concurrent openers
+/// do not both apply a migration and collide on the `schema_migrations` primary
+/// key. Validates the per-migration `BEGIN IMMEDIATE` + re-check fix.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_opens_apply_each_migration_once() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir
+        .path()
+        .join("race.db")
+        .to_str()
+        .expect("utf8")
+        .to_owned();
+
+    // Spawn many concurrent first-time opens of the same database.
+    let mut handles = Vec::new();
+    for _ in 0..16 {
+        let path = path.clone();
+        handles.push(tokio::spawn(
+            async move { Db::open(&path).await.map(|_| ()) },
+        ));
+    }
+    for h in handles {
+        h.await
+            .expect("task panicked")
+            .expect("concurrent Db::open must not error on a migration race");
+    }
+
+    // Ledger must have exactly one row per bundled migration — no duplicates,
+    // none missing.
+    let db = Db::open(&path).await.expect("final open");
+    assert_eq!(
+        ledger_count(&db).await,
+        ledger_versions(&db).await.len() as i64,
+        "no duplicate ledger rows after concurrent opens",
+    );
+}

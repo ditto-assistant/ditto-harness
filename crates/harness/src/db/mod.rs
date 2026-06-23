@@ -81,27 +81,78 @@ impl Db {
     /// `schema_migrations` ledger. Idempotent: already-applied versions are
     /// skipped, so this is safe to call on every open.
     ///
-    /// Each migration's statements and its ledger insert run inside one
-    /// `BEGIN; … ; COMMIT;` batch, so a failure mid-migration rolls back
-    /// without leaving a partial schema or a ledger row.
+    /// Concurrency-safe: each pending migration is applied under a
+    /// `BEGIN IMMEDIATE` write transaction, and the "already applied?" check is
+    /// re-run *inside* that transaction. Two processes opening the same database
+    /// at once therefore serialize on the write lock, and the second one sees
+    /// the migration as applied and skips it (rather than both racing to run the
+    /// DDL and colliding on the `schema_migrations` primary key). The DDL and
+    /// the ledger insert commit together or roll back together.
     pub async fn migrate(&self) -> Result<()> {
+        // Wait (rather than erroring with BUSY) when another opener holds the
+        // write lock during concurrent migration.
+        self.conn.busy_timeout(std::time::Duration::from_secs(5))?;
         self.conn.execute(SCHEMA_MIGRATIONS_DDL, ()).await?;
+        // Read-only fast path: a snapshot of applied versions lets the common
+        // "nothing pending" open avoid taking a write lock at all.
         let applied = self.applied_migration_versions().await?;
         for m in MIGRATIONS {
             if applied.contains(&m.version) {
                 continue;
             }
-            // `version` is an integer and `name` is a compile-time snake_case
-            // constant (see migrations/README.md), so inlining them into the
-            // batch is injection-safe and lets the whole migration commit
-            // atomically via execute_batch.
-            let script = format!(
-                "BEGIN;\n{}\nINSERT INTO schema_migrations (version, name) VALUES ({}, '{}');\nCOMMIT;",
-                m.sql, m.version, m.name
-            );
-            self.conn.execute_batch(&script).await?;
+            self.apply_migration(m).await?;
         }
         Ok(())
+    }
+
+    /// Applies one migration atomically under a write lock, re-checking the
+    /// ledger inside the transaction to close the check-then-apply race with a
+    /// concurrent opener. Rolls back on any error.
+    async fn apply_migration(&self, m: &Migration) -> Result<()> {
+        self.conn.execute("BEGIN IMMEDIATE", ()).await?;
+        match self.apply_migration_locked(m).await {
+            Ok(()) => {
+                self.conn.execute("COMMIT", ()).await?;
+                Ok(())
+            }
+            Err(e) => {
+                // Best effort: surface the original error, not the rollback's.
+                let _ = self.conn.execute("ROLLBACK", ()).await;
+                Err(e)
+            }
+        }
+    }
+
+    /// Body of [`Self::apply_migration`], run with the write lock held. Re-checks
+    /// the ledger first: another opener may have applied this migration while we
+    /// were waiting for the lock, in which case this is a no-op.
+    async fn apply_migration_locked(&self, m: &Migration) -> Result<()> {
+        if self.migration_applied(m.version).await? {
+            return Ok(());
+        }
+        self.conn.execute_batch(m.sql).await?;
+        self.conn
+            .execute(
+                "INSERT INTO schema_migrations (version, name) VALUES (?, ?)",
+                (
+                    turso::Value::Integer(m.version),
+                    turso::Value::Text(m.name.to_string()),
+                ),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Whether `version` is recorded in the `schema_migrations` ledger.
+    async fn migration_applied(&self, version: i64) -> Result<bool> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT 1 FROM schema_migrations WHERE version = ? LIMIT 1",
+                (turso::Value::Integer(version),),
+            )
+            .await?;
+        Ok(rows.next().await?.is_some())
     }
 
     /// Versions already recorded in the `schema_migrations` ledger.
