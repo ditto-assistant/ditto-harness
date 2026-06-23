@@ -238,6 +238,7 @@ impl Harness {
             db: Arc::new(db),
             embedder: Arc::clone(&embedder),
             predictor: None,
+            reranker: None,
         }));
         Ok(Harness {
             store,

@@ -23,3 +23,5 @@ futures = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 anyhow = { workspace = true }
+turso = { workspace = true }
+tokio = { workspace = true }

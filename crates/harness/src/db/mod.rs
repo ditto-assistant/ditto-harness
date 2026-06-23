@@ -23,84 +23,31 @@ use crate::types::{Error, Result};
 /// Embedding dimension used across the harness (embeddinggemma).
 pub const EMBEDDING_DIMS: usize = 768;
 
-/// Full schema, one statement per slice entry, applied in order. Every
-/// statement is idempotent (`IF NOT EXISTS`), so [`Db::migrate`] can run on
-/// every open.
-pub const SCHEMA_STATEMENTS: &[&str] = &[
-    "CREATE TABLE IF NOT EXISTS harness_users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        uid TEXT NOT NULL UNIQUE,
-        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-    )",
-    "CREATE TABLE IF NOT EXISTS memory_pairs (
-        id TEXT PRIMARY KEY,
-        firestore_pair_id TEXT NOT NULL,
-        user_id TEXT NOT NULL REFERENCES harness_users(uid) ON UPDATE CASCADE ON DELETE CASCADE,
-        kg_id TEXT NOT NULL,
-        session_id TEXT,
-        title TEXT,
-        description TEXT,
-        prompt TEXT,
-        response TEXT,
-        input TEXT,
-        output TEXT,
-        source TEXT,
-        source_context TEXT,
-        timestamp TEXT NOT NULL,
-        timezone_offset INTEGER,
-        seed_memories TEXT,
-        retrieval_metadata TEXT,
-        conversation_embedding F32_BLOB(768),
-        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-        UNIQUE (user_id, firestore_pair_id)
-    )",
-    "CREATE TABLE IF NOT EXISTS subjects (
-        id TEXT PRIMARY KEY,
-        user_id TEXT NOT NULL REFERENCES harness_users(uid) ON UPDATE CASCADE ON DELETE CASCADE,
-        kg_id TEXT NOT NULL,
-        subject_text TEXT NOT NULL,
-        description_text TEXT,
-        is_key_subject INTEGER NOT NULL DEFAULT 0,
-        embedding F32_BLOB(768),
-        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-        UNIQUE (user_id, kg_id, subject_text)
-    )",
-    "CREATE TABLE IF NOT EXISTS subject_memory_pair_links (
-        subject_id TEXT NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
-        pair_id TEXT NOT NULL REFERENCES memory_pairs(id) ON DELETE CASCADE,
-        user_id TEXT NOT NULL REFERENCES harness_users(uid) ON UPDATE CASCADE ON DELETE CASCADE,
-        kg_id TEXT NOT NULL,
-        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-        PRIMARY KEY (subject_id, pair_id)
-    )",
-    "CREATE TABLE IF NOT EXISTS retrieval_events (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id TEXT NOT NULL,
-        kg_id TEXT NOT NULL,
-        session_id TEXT NOT NULL DEFAULT '',
-        request_path TEXT NOT NULL DEFAULT '',
-        query TEXT NOT NULL DEFAULT '',
-        query_embedding F32_BLOB(768),
-        retrieved_pair_ids TEXT NOT NULL DEFAULT '[]',
-        weights TEXT NOT NULL DEFAULT '{}',
-        aux_features TEXT NOT NULL DEFAULT '{}',
-        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-    )",
-    "CREATE INDEX IF NOT EXISTS idx_memory_pairs_user_session_timestamp
-        ON memory_pairs (user_id, session_id, timestamp DESC)",
-    "CREATE INDEX IF NOT EXISTS idx_memory_pairs_user_kg_timestamp
-        ON memory_pairs (user_id, kg_id, timestamp DESC)",
-    "CREATE INDEX IF NOT EXISTS idx_subjects_user_kg_key
-        ON subjects (user_id, kg_id, is_key_subject, updated_at DESC)",
-    "CREATE INDEX IF NOT EXISTS idx_subject_memory_pair_links_pair
-        ON subject_memory_pair_links (pair_id)",
-    "CREATE INDEX IF NOT EXISTS idx_subject_memory_pair_links_user_kg
-        ON subject_memory_pair_links (user_id, kg_id)",
-    "CREATE INDEX IF NOT EXISTS idx_retrieval_events_user_created
-        ON retrieval_events (user_id, created_at DESC)",
-];
+/// A single forward-only migration. `sql` is embedded from the matching file
+/// under `migrations/`; `version` is its numeric filename prefix and defines
+/// apply order. See `migrations/README.md` for the authoring convention.
+struct Migration {
+    version: i64,
+    name: &'static str,
+    sql: &'static str,
+}
+
+/// All migrations, in apply order. To add one, create the next-numbered
+/// `migrations/NNNN_name.sql` file and append a matching entry here (keep
+/// versions contiguous; never edit or reorder a released entry).
+const MIGRATIONS: &[Migration] = &[Migration {
+    version: 1,
+    name: "initial_schema",
+    sql: include_str!("../../migrations/0001_initial_schema.sql"),
+}];
+
+/// Bookkeeping ledger of applied migration versions. Managed by
+/// [`Db::migrate`]; never written by a migration file.
+const SCHEMA_MIGRATIONS_DDL: &str = "CREATE TABLE IF NOT EXISTS schema_migrations (
+    version INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+)";
 
 /// Handle to a Turso database with the harness schema applied.
 #[derive(Clone)]
@@ -130,12 +77,44 @@ impl Db {
         Ok(db)
     }
 
-    /// Applies the schema idempotently. Safe to call on every open.
+    /// Applies any pending migrations in version order, recording each in the
+    /// `schema_migrations` ledger. Idempotent: already-applied versions are
+    /// skipped, so this is safe to call on every open.
+    ///
+    /// Each migration's statements and its ledger insert run inside one
+    /// `BEGIN; … ; COMMIT;` batch, so a failure mid-migration rolls back
+    /// without leaving a partial schema or a ledger row.
     pub async fn migrate(&self) -> Result<()> {
-        for stmt in SCHEMA_STATEMENTS {
-            self.conn.execute(stmt, ()).await?;
+        self.conn.execute(SCHEMA_MIGRATIONS_DDL, ()).await?;
+        let applied = self.applied_migration_versions().await?;
+        for m in MIGRATIONS {
+            if applied.contains(&m.version) {
+                continue;
+            }
+            // `version` is an integer and `name` is a compile-time snake_case
+            // constant (see migrations/README.md), so inlining them into the
+            // batch is injection-safe and lets the whole migration commit
+            // atomically via execute_batch.
+            let script = format!(
+                "BEGIN;\n{}\nINSERT INTO schema_migrations (version, name) VALUES ({}, '{}');\nCOMMIT;",
+                m.sql, m.version, m.name
+            );
+            self.conn.execute_batch(&script).await?;
         }
         Ok(())
+    }
+
+    /// Versions already recorded in the `schema_migrations` ledger.
+    async fn applied_migration_versions(&self) -> Result<std::collections::HashSet<i64>> {
+        let mut rows = self
+            .conn
+            .query("SELECT version FROM schema_migrations", ())
+            .await?;
+        let mut out = std::collections::HashSet::new();
+        while let Some(row) = rows.next().await? {
+            out.insert(get_i64(&row, 0)?);
+        }
+        Ok(out)
     }
 
     /// Raw connection access for modules that run bespoke SQL
@@ -936,10 +915,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn migrations_apply_idempotently() {
+    async fn migrations_apply_and_are_idempotent() {
         let db = Db::open_memory().await.expect("open memory db");
-        // Second run must be a no-op thanks to IF NOT EXISTS.
+        // Every bundled migration must be recorded in the ledger after open.
+        let applied = db.applied_migration_versions().await.expect("read ledger");
+        let expected: std::collections::HashSet<i64> =
+            MIGRATIONS.iter().map(|m| m.version).collect();
+        assert_eq!(applied, expected, "all migrations recorded in ledger");
+
+        // Re-running must be a no-op: skipped via the ledger, not re-executed,
+        // and the ledger row count stays stable (no duplicate inserts).
         db.migrate().await.expect("re-run migrations");
+        let mut rows = db
+            .connection()
+            .query("SELECT COUNT(*) FROM schema_migrations", ())
+            .await
+            .expect("count ledger");
+        let row = rows.next().await.expect("next").expect("count row");
+        assert_eq!(get_i64(&row, 0).expect("count"), MIGRATIONS.len() as i64);
+
         // created_at defaults must fire.
         db.connection()
             .execute("INSERT INTO harness_users (uid) VALUES ('u1')", ())
