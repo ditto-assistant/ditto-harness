@@ -1,10 +1,10 @@
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: MIT
 //! Turso (SQLite-family) database layer.
 //!
-//! Ports the Postgres schema from `db/migrations/000001_memory_schema.up.sql`
-//! and the sqlc queries from `db/query/memory.sql` to Turso's SQLite dialect.
+//! Adapts the original Postgres memory schema and queries to Turso's SQLite
+//! dialect.
 //!
-//! Schema mapping decisions (see `NOTES.md` for the spike verdict):
+//! Schema mapping decisions:
 //! - `UUID` PKs -> `TEXT`, uuid v4 generated in Rust ([`new_row_id`]).
 //! - `BIGSERIAL` -> `INTEGER PRIMARY KEY AUTOINCREMENT`.
 //! - `TIMESTAMPTZ` -> `TEXT`, UTC RFC3339 via [`format_timestamp`] (fixed
@@ -15,6 +15,16 @@
 //!   blob ([`encode_f32_blob`]). Note `vector_distance_cos` returns cosine
 //!   *distance*; similarity = `1 - distance` (mirrors pgvector `<=>`).
 //! - HNSW indexes are skipped; per-user brute-force scans are fine locally.
+//!
+//! # Two pair ids
+//!
+//! Every memory pair has two ids. The internal row UUID (`memory_pairs.id`,
+//! surfaced as `Memory::source_pair_id`) is what
+//! `subject_memory_pair_links.pair_id` references. The public pair id
+//! (`memory_pairs.firestore_pair_id`, surfaced as `Memory::id`) is what
+//! search results, `exclude_pair_ids` lists, and the memory tools speak.
+//! Custom SQL must not mix them: joining the link table on
+//! `firestore_pair_id`, or excluding by row UUID, silently matches nothing.
 
 use chrono::{DateTime, SecondsFormat, Utc};
 
@@ -22,6 +32,10 @@ use crate::types::{Error, Result};
 
 /// Embedding dimension used across the harness (embeddinggemma).
 pub const EMBEDDING_DIMS: usize = 768;
+
+/// Max ids per `IN (?,...)` batch in [`Db::fetch_memories`]; keeps statements
+/// comfortably under SQLite bind-parameter limits.
+const FETCH_MEMORIES_CHUNK_SIZE: usize = 500;
 
 /// Full schema, one statement per slice entry, applied in order. Every
 /// statement is idempotent (`IF NOT EXISTS`), so [`Db::migrate`] can run on
@@ -105,6 +119,7 @@ pub const SCHEMA_STATEMENTS: &[&str] = &[
 /// Handle to a Turso database with the harness schema applied.
 #[derive(Clone)]
 pub struct Db {
+    /// Never read directly, but held so the database outlives `conn`.
     #[allow(dead_code)]
     database: turso::Database,
     conn: turso::Connection,
@@ -138,13 +153,12 @@ impl Db {
         Ok(())
     }
 
-    /// Raw connection access for modules that run bespoke SQL
-    /// (`retrieval::composite_retrieve`, `retrieval::log_event`).
+    /// Raw connection access for modules that run bespoke SQL.
     pub fn connection(&self) -> &turso::Connection {
         &self.conn
     }
 
-    /// `-- name: UpsertUser :exec` — insert the uid, ignoring conflicts.
+    /// Inserts the uid, ignoring conflicts.
     pub async fn upsert_user(&self, uid: &str) -> Result<()> {
         self.conn
             .execute(
@@ -155,10 +169,10 @@ impl Db {
         Ok(())
     }
 
-    /// `-- name: CreateMemoryPair :one` — upsert on (user_id, firestore_pair_id),
-    /// returning the stored row. Empty-string params for session_id/title/
-    /// description/prompt/response/source/source_context are stored as NULL
-    /// (Go `NULLIF(..., '')`); `updated_at` is refreshed on conflict.
+    /// Upserts on (user_id, firestore_pair_id), returning the stored row.
+    /// Empty-string params for session_id/title/description/prompt/response/
+    /// source/source_context are stored as NULL; `updated_at` is refreshed on
+    /// conflict.
     pub async fn create_memory_pair(
         &self,
         params: CreateMemoryPairParams,
@@ -219,7 +233,7 @@ impl Db {
         }
     }
 
-    /// `-- name: UpsertSubject :one` — upsert on (user_id, kg_id, subject_text).
+    /// Upserts on (user_id, kg_id, subject_text).
     /// On conflict: COALESCE non-empty description, OR the key flag, COALESCE
     /// embedding, refresh updated_at. Returns the stored row.
     pub async fn upsert_subject(&self, params: UpsertSubjectParams) -> Result<SubjectRow> {
@@ -249,7 +263,7 @@ impl Db {
         }
     }
 
-    /// `-- name: LinkSubjectMemoryPair :exec` — insert link, ignoring conflicts.
+    /// Inserts a subject/pair link, ignoring conflicts.
     pub async fn link_subject_memory_pair(
         &self,
         subject_id: &str,
@@ -273,9 +287,9 @@ impl Db {
         Ok(())
     }
 
-    /// `-- name: FetchMemories :many` — rows for the given public pair ids
-    /// (`firestore_pair_id`), preserving the order of `pair_ids` (Go uses
-    /// `array_position`; here order the results in Rust by input index).
+    /// Fetches rows for the given public pair ids (`firestore_pair_id`),
+    /// preserving the order of `pair_ids` (results are re-ordered in Rust by
+    /// input index).
     pub async fn fetch_memories(
         &self,
         user_id: &str,
@@ -284,20 +298,24 @@ impl Db {
         if pair_ids.is_empty() {
             return Ok(Vec::new());
         }
-        let sql = format!(
-            "SELECT {} FROM memory_pairs WHERE user_id = ? AND firestore_pair_id IN ({})",
-            MEMORY_PAIR_COLUMNS,
-            placeholders(pair_ids.len())
-        );
-        let mut args = Vec::with_capacity(1 + pair_ids.len());
-        args.push(turso::Value::Text(user_id.to_string()));
-        args.extend(pair_ids.iter().map(|id| turso::Value::Text(id.clone())));
-        let mut rows = self.conn.query(&sql, args).await?;
+        // Chunk the `IN (?,...)` list so a huge id set cannot blow past
+        // SQLite parameter limits.
         let mut out = Vec::new();
-        while let Some(row) = rows.next().await? {
-            out.push(decode_memory_pair_row(&row, false)?);
+        for chunk in pair_ids.chunks(FETCH_MEMORIES_CHUNK_SIZE) {
+            let sql = format!(
+                "SELECT {} FROM memory_pairs WHERE user_id = ? AND firestore_pair_id IN ({})",
+                MEMORY_PAIR_COLUMNS,
+                placeholders(chunk.len())
+            );
+            let mut args = Vec::with_capacity(1 + chunk.len());
+            args.push(turso::Value::Text(user_id.to_string()));
+            args.extend(chunk.iter().map(|id| turso::Value::Text(id.clone())));
+            let mut rows = self.conn.query(&sql, args).await?;
+            while let Some(row) = rows.next().await? {
+                out.push(decode_memory_pair_row(&row, false)?);
+            }
         }
-        // Preserve the input order (Go: ORDER BY array_position(...)).
+        // Preserve the input order.
         let index: std::collections::HashMap<&str, usize> = pair_ids
             .iter()
             .enumerate()
@@ -312,7 +330,7 @@ impl Db {
         Ok(out)
     }
 
-    /// `-- name: ListRecentMemories :many` — newest-first for the resolved
+    /// Lists memories newest-first for the resolved
     /// session (`COALESCE(session_id,'main') = COALESCE(NULLIF(?,''),'main')`),
     /// excluding `exclude_pair_ids`, limited to `limit`.
     pub async fn list_recent_memories(
@@ -346,7 +364,7 @@ impl Db {
         Ok(out)
     }
 
-    /// `-- name: SearchMemories :many` — vector search ordered by cosine
+    /// Vector search ordered by cosine
     /// distance then timestamp DESC, with `similarity = 1 - distance` filtered
     /// by `min_similarity`. Empty `session_id` searches all sessions.
     pub async fn search_memories(
@@ -391,7 +409,7 @@ impl Db {
         Ok(out)
     }
 
-    /// `-- name: SearchSubjects :many` — vector search over subjects with a
+    /// Vector search over subjects with a
     /// LEFT JOIN link count (`memory_count`), ordered by distance, then
     /// memory_count DESC, then updated_at DESC.
     pub async fn search_subjects(&self, params: SearchSubjectsParams) -> Result<Vec<SubjectRow>> {
@@ -425,7 +443,7 @@ impl Db {
         Ok(out)
     }
 
-    /// `-- name: SearchMemoriesBySubject :many` — vector search restricted to
+    /// Vector search restricted to
     /// pairs linked to `subject_id`, ordered by distance then timestamp DESC.
     pub async fn search_memories_by_subject(
         &self,
@@ -487,8 +505,8 @@ fn placeholders(n: usize) -> String {
     out
 }
 
-/// Appends `AND col NOT IN (?, ...)` when `ids` is non-empty (Go:
-/// `!= ALL($x::text[])`, where a NULL array disables the filter).
+/// Appends `AND col NOT IN (?, ...)` when `ids` is non-empty; an empty list
+/// adds no filter.
 fn push_not_in_clause(
     sql: &mut String,
     args: &mut Vec<turso::Value>,
@@ -505,7 +523,7 @@ fn push_not_in_clause(
     args.extend(ids.iter().map(|id| turso::Value::Text(id.clone())));
 }
 
-/// Go `NULLIF(arg, '')`: empty strings are stored as NULL.
+/// `NULLIF(arg, '')` equivalent: empty strings are stored as NULL.
 fn text_or_null(s: &str) -> turso::Value {
     if s.is_empty() {
         turso::Value::Null
@@ -515,7 +533,7 @@ fn text_or_null(s: &str) -> turso::Value {
 }
 
 /// `None`/empty embeddings bind as NULL; non-empty ones must be
-/// [`EMBEDDING_DIMS`] long (Go's `vectorValue` panics on a dim mismatch).
+/// [`EMBEDDING_DIMS`] long (a dimension mismatch is an error).
 fn embedding_or_null(v: Option<&[f32]>) -> Result<turso::Value> {
     match v {
         None | Some([]) => Ok(turso::Value::Null),
@@ -644,7 +662,7 @@ fn decode_subject_row(row: &turso::Row, with_search_cols: bool) -> Result<Subjec
 }
 
 /// Parameters for [`Db::create_memory_pair`]. String fields documented as
-/// "empty -> NULL" mirror Go's `NULLIF(..., '')`.
+/// "empty -> NULL" are bound as NULL when empty.
 #[derive(Debug, Clone)]
 pub struct CreateMemoryPairParams {
     pub firestore_pair_id: String,
@@ -824,7 +842,7 @@ pub fn decode_f32_blob(b: &[u8]) -> Vec<f32> {
 }
 
 /// Rust-side cosine similarity. Returns `None` for empty or mismatched
-/// lengths or zero-norm inputs (mirrors Go `retrieval.cosineSimilarity`).
+/// lengths or zero-norm inputs.
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> Option<f32> {
     if a.is_empty() || a.len() != b.len() {
         return None;
@@ -862,7 +880,10 @@ mod tests {
         }
     }
 
-    /// Permanent spike: asserts the native vector path chosen for the schema.
+    /// Permanent probe: asserts the native vector path chosen for the schema.
+    /// Turso's `vector_distance_cos` returns cosine *distance*, i.e.
+    /// `1 - cosine_similarity` (identical vectors -> 0.0, orthogonal -> 1.0);
+    /// every similarity in the query layer is computed as `1 - distance`.
     #[tokio::test]
     async fn turso_native_vector_support() {
         let conn = raw_conn().await;
@@ -905,7 +926,7 @@ mod tests {
         );
     }
 
-    /// Probes used by the db port agent: upsert + RETURNING must work.
+    /// Permanent probe: upsert + RETURNING must be supported by turso.
     #[tokio::test]
     async fn turso_upsert_and_returning_support() {
         let conn = raw_conn().await;

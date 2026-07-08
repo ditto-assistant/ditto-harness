@@ -1,8 +1,7 @@
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: MIT
 //! Memory tools exposed to the agent loop (and MCP hosts).
-//! Port of Go `pkg/memory/tools.go`.
 //!
-//! Tool surface (names, descriptions, and JSON arg shapes match Go exactly):
+//! Tool surface (names, descriptions, and JSON arg shapes):
 //! - `save_memory`: args `{prompt, response, summary, sessionId,
 //!   subjects: [{text, description, key}]}`; saves with source
 //!   "agent_tool"; returns `{"memory": <Memory JSON>}`.
@@ -28,7 +27,7 @@ use super::{
 };
 use crate::types::{Result, Tool, ToolDefinition};
 
-/// Options for building memory tools (Go: `memory.ToolOptions`).
+/// Options for building memory tools.
 #[derive(Clone)]
 pub struct ToolOptions {
     pub store: Arc<Store>,
@@ -57,7 +56,7 @@ impl ToolOptions {
     }
 }
 
-/// All five memory tools with default budgets (Go: `memory.Tools`).
+/// All five memory tools with default budgets.
 pub fn memory_tools(store: Arc<Store>, user_id: &str, kg_id: &str) -> Vec<Box<dyn Tool>> {
     memory_tools_with(ToolOptions::new(store, user_id, kg_id))
 }
@@ -73,27 +72,27 @@ pub fn memory_tools_with(opts: ToolOptions) -> Vec<Box<dyn Tool>> {
     ]
 }
 
-/// `save_memory` (Go: `SaveMemoryTool`).
+/// `save_memory`.
 pub fn save_memory_tool(opts: &ToolOptions) -> Box<dyn Tool> {
     Box::new(SaveMemoryTool { opts: opts.clone() })
 }
 
-/// `search_memories` (Go: `SearchMemoriesTool`).
+/// `search_memories`.
 pub fn search_memories_tool(opts: &ToolOptions) -> Box<dyn Tool> {
     Box::new(SearchMemoriesTool { opts: opts.clone() })
 }
 
-/// `search_subjects` (Go: `SearchSubjectsTool`).
+/// `search_subjects`.
 pub fn search_subjects_tool(opts: &ToolOptions) -> Box<dyn Tool> {
     Box::new(SearchSubjectsTool { opts: opts.clone() })
 }
 
-/// `search_memories_in_subjects` (Go: `SearchMemoriesInSubjectsTool`).
+/// `search_memories_in_subjects`.
 pub fn search_memories_in_subjects_tool(opts: &ToolOptions) -> Box<dyn Tool> {
     Box::new(SearchMemoriesInSubjectsTool { opts: opts.clone() })
 }
 
-/// `fetch_memories` (Go: `FetchMemoriesTool`).
+/// `fetch_memories`.
 pub fn fetch_memories_tool(opts: &ToolOptions) -> Box<dyn Tool> {
     Box::new(FetchMemoriesTool { opts: opts.clone() })
 }
@@ -114,7 +113,8 @@ impl ToolOptions {
     }
 }
 
-/// Non-negative `topK` (Go ints <= 0 fall back to the store default of 8).
+/// Non-negative `topK`; values <= 0 become 0 and fall back to the store
+/// default of 8.
 fn limit_from_top_k(top_k: i64) -> usize {
     top_k.max(0) as usize
 }
@@ -293,7 +293,8 @@ impl Tool for SearchMemoriesInSubjectsTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "search_memories_in_subjects".to_string(),
-            description: "Search memories inside one or more subject IDs.".to_string(),
+            description: "Search memories linked to a single subject ID (from search_subjects)."
+                .to_string(),
             input_schema: json!({
                 "type": "object",
                 "required": ["queries"],
@@ -387,7 +388,7 @@ mod tests {
     use super::super::test_support::new_test_store;
     use super::*;
 
-    /// Port of Go `TestMemoryToolsExposeExpectedDefinitions`.
+    /// All five tools are exposed with valid object schemas, in order.
     #[tokio::test]
     async fn memory_tools_expose_expected_definitions() {
         let store = Arc::new(new_test_store().await);
@@ -417,7 +418,7 @@ mod tests {
         );
     }
 
-    /// Port of Go `TestMemoryToolsCallThroughStore`.
+    /// Each tool's execute path round-trips through a real store.
     #[tokio::test]
     async fn memory_tools_call_through_store() {
         let store = Arc::new(new_test_store().await);

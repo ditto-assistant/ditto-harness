@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: MIT
 //! Node.js bindings for ditto-harness (napi-rs v3).
 //!
 //! Deliberately JSON-heavy: memories, subjects, and dream reports cross the
@@ -238,6 +238,7 @@ impl Harness {
             db: Arc::new(db),
             embedder: Arc::clone(&embedder),
             predictor: None,
+            reranker: None,
         }));
         Ok(Harness {
             store,

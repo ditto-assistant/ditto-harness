@@ -1,15 +1,15 @@
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: MIT
 //! Auxiliary feature extraction for the learned-weight predictor.
-//! Port of Go `pkg/retrieval/features.go`.
 
 use chrono::{DateTime, Timelike, Utc};
 
-/// Dimension of the auxiliary feature vector (Go: `AuxFeatureDim`).
+/// Dimension of the auxiliary feature vector.
 pub const AUX_FEATURE_DIM: usize = 17;
-/// Dimension used by legacy model artifacts (Go: `LegacyAuxFeatureDim`).
+/// Dimension used by legacy model artifacts.
 pub const LEGACY_AUX_FEATURE_DIM: usize = 6;
 
-/// Feature vector layout (indexes 0..17), matching Go exactly:
+/// Feature vector layout (indexes 0..17); the layout is fixed — trained
+/// model artifacts depend on it:
 /// 0 normalized word count (words/15, capped at 1)
 /// 1 has temporal keyword (0/1)
 /// 2 has frequency keyword (0/1)
@@ -35,12 +35,12 @@ pub const AUX_LOG_NUM_PAIRS_IDX: usize = 14;
 pub const AUX_LOG_DAYS_SINCE_SIGNUP_IDX: usize = 15;
 pub const AUX_QUERY_CORPUS_DRIFT_IDX: usize = 16;
 
-/// Context for richer feature extraction (Go: `AuxFeatureContext`).
+/// Context for richer feature extraction.
 /// `None`/empty fields zero out the corresponding features.
 #[derive(Debug, Clone, Default)]
 pub struct AuxFeatureContext {
-    /// Free-form question type; mapped to a one-hot index (see
-    /// `question_type_one_hot_idx` rules in the Go source: suffix `_abs` or
+    /// Free-form question type; mapped to a one-hot index by
+    /// `question_type_one_hot_idx` (suffix `_abs` or
     /// "abstention" -> abstention; contains "multi" -> multi-session;
     /// "knowledge" -> knowledge update; "temporal" -> temporal reasoning;
     /// "single"/"extraction"/"preference"/"user"/"assistant" -> info
@@ -54,8 +54,9 @@ pub struct AuxFeatureContext {
     pub user_corpus_centroid: Vec<f32>,
 }
 
-/// Keyword lists copied verbatim from Go (substring matched on the lowercased
-/// query; each matching keyword counts once).
+/// Keyword lists (substring matched on the lowercased query; each matching
+/// keyword counts once). The lists are part of the feature definition — do not
+/// edit them without retraining the predictor.
 pub(crate) const TEMPORAL_KEYWORDS: &[&str] = &[
     "yesterday",
     "today",
@@ -133,14 +134,12 @@ pub(crate) const SPECIFICITY_KEYWORDS: &[&str] = &[
     "tell me about",
 ];
 
-/// Extracts auxiliary features with an empty context
-/// (Go: `ExtractAuxiliaryFeatures`).
+/// Extracts auxiliary features with an empty context.
 pub fn extract_auxiliary_features(query: &str) -> [f32; AUX_FEATURE_DIM] {
     extract_auxiliary_features_context(query, &AuxFeatureContext::default())
 }
 
-/// Extracts auxiliary features with context
-/// (Go: `ExtractAuxiliaryFeaturesContext`). See the layout doc on
+/// Extracts auxiliary features with context. See the layout doc on
 /// [`AUX_FEATURE_DIM`]'s sibling constants above. Hour-of-day features use
 /// the UTC hour/minute of `ctx.now`.
 pub fn extract_auxiliary_features_context(
@@ -191,7 +190,7 @@ pub fn extract_auxiliary_features_context(
     out
 }
 
-/// Fractional seconds in a chrono duration (Go: `time.Duration.Seconds()`).
+/// Fractional seconds in a chrono duration.
 pub(crate) fn duration_seconds(d: chrono::Duration) -> f64 {
     match d.num_microseconds() {
         Some(us) => us as f64 / 1e6,
@@ -199,8 +198,8 @@ pub(crate) fn duration_seconds(d: chrono::Duration) -> f64 {
     }
 }
 
-/// Maps a free-form question type onto its one-hot index
-/// (Go: `questionTypeOneHotIdx`; `None` leaves the one-hot all zero).
+/// Maps a free-form question type onto its one-hot index; `None` leaves the
+/// one-hot all zero.
 fn question_type_one_hot_idx(qtype: &str) -> Option<usize> {
     if qtype.is_empty() {
         return None;
@@ -229,15 +228,14 @@ fn question_type_one_hot_idx(qtype: &str) -> Option<usize> {
     None
 }
 
-/// Number of keywords appearing as substrings of `text`
-/// (Go: `countKeywordMatches`).
+/// Number of keywords appearing as substrings of `text`.
 fn count_keyword_matches(text: &str, keywords: &[&str]) -> usize {
     keywords.iter().filter(|kw| text.contains(*kw)).count()
 }
 
 /// True when a word after the first starts a Capitalized-lowercase pattern
-/// mid-sentence (Go: `hasNamedEntityPattern`). Words following sentence
-/// punctuation (`.`, `!`, `?`) are skipped.
+/// mid-sentence. Words following sentence punctuation (`.`, `!`, `?`) are
+/// skipped.
 fn has_named_entity_pattern(words: &[&str]) -> bool {
     for i in 1..words.len() {
         if let Some(last) = words[i - 1].chars().last() {
@@ -268,7 +266,6 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
 
-    /// Port of Go `TestExtractAuxiliaryFeaturesContext`.
     #[test]
     fn extract_auxiliary_features_context_populates_features() {
         let now = Utc
@@ -328,7 +325,7 @@ mod tests {
     }
 
     #[test]
-    fn question_type_mapping_matches_go() {
+    fn question_type_maps_to_one_hot_index() {
         assert_eq!(
             question_type_one_hot_idx("multi_session"),
             Some(QTYPE_MULTI_SESSION_IDX)

@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: AGPL-3.0-or-later
-//! Loadable learned-weight MLP predictor. Port of Go `pkg/retrieval/mlp.go`.
+// SPDX-License-Identifier: MIT
+//! Loadable learned-weight MLP predictor.
 //!
 //! Binary artifact format (all little-endian):
 //! - `u16` tensor count
@@ -16,11 +16,22 @@
 //! output_fc.weight.dims[0]` (3 when missing), `use_scale` when an
 //! `output_scale.weight` tensor exists or `output_dim == V2_NUM_WEIGHTS + 1`.
 //!
-//! Forward pass (Go `predictRaw`): 768 -> fc1(256) -> layernorm -> relu ->
+//! Forward pass (`predict_raw`): 768 -> fc1(256) -> layernorm -> relu ->
 //! fc2(64) -> layernorm -> relu -> concat aux[..aux_dim] -> fusion(32) ->
 //! layernorm -> relu -> output(output_dim). With `use_scale`, the last output
 //! element is the scale (0 -> 1.0) and softmax applies to the head; otherwise
 //! softmax applies to the whole output and scale is 1.0.
+//!
+//! # Aux features populated at inference
+//!
+//! At inference the harness fills only `Features::query`,
+//! `Features::query_embedding`, `Features::now`, and
+//! `Features::current_session_id` (and the MLP's aux extraction consumes only
+//! the first three). Of the 17-dim aux layout ([`AUX_FEATURE_DIM`]), that
+//! leaves the question-type one-hot (indexes 6-10), last-query recency (13),
+//! num-pairs (14), signup age (15), and query-corpus drift (16) always zero.
+//! A custom predictor trained against the 17-dim layout must reproduce that
+//! skew or its training and inference distributions will not match.
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -42,7 +53,22 @@ const EMBED_HIDDEN1_DIM: usize = 256;
 const EMBED_HIDDEN2_DIM: usize = 64;
 const FUSION_DIM: usize = 32;
 
-/// Learned-weight MLP predictor (Go: `MLPPredictor`). An unloaded/default
+/// Hard cap on a single tensor's byte length in a model artifact. The real
+/// model's largest tensor (`embed_fc1.weight`, 256x768 f32) is under 1 MiB,
+/// so 64 MiB is generous headroom while refusing absurd/corrupt headers
+/// before allocating.
+const MAX_TENSOR_BYTES: usize = 64 * 1024 * 1024;
+
+/// Fallback fusion weights returned by `predict_v2` when no model artifact is
+/// loaded (cosine / recencyLinear / subjectFrequency). Deliberately NOT the
+/// same values as [`default_weights`] (0.65 / 0.20 / 0.15): this is the
+/// historical V2-path fallback, and changing it would silently shift ranking
+/// for deployments running without a model artifact.
+const UNLOADED_FALLBACK_COSINE: f64 = 0.6;
+const UNLOADED_FALLBACK_RECENCY_LINEAR: f64 = 0.25;
+const UNLOADED_FALLBACK_SUBJECT_FREQUENCY: f64 = 0.15;
+
+/// Learned-weight MLP predictor. An unloaded/default
 /// predictor returns [`default_weights`] from `predict`.
 #[derive(Debug, Clone, Default)]
 pub struct MlpPredictor {
@@ -67,14 +93,13 @@ pub struct MlpPredictor {
 }
 
 impl MlpPredictor {
-    /// Loads a model artifact from a file (Go: `LoadMLPPredictor`).
+    /// Loads a model artifact from a file.
     pub fn load(path: &Path) -> Result<MlpPredictor> {
         let file = std::fs::File::open(path)?;
         MlpPredictor::load_from_reader(std::io::BufReader::new(file))
     }
 
-    /// Loads a model artifact from a reader
-    /// (Go: `LoadMLPPredictorFromReader`).
+    /// Loads a model artifact from a reader.
     pub fn load_from_reader(mut reader: impl Read) -> Result<MlpPredictor> {
         let num_tensors = read_u16(&mut reader, "tensor count")?;
         let mut tensors: HashMap<String, Tensor> = HashMap::with_capacity(num_tensors as usize);
@@ -96,7 +121,15 @@ impl MlpPredictor {
                     .checked_mul(dim as usize)
                     .ok_or_else(|| Error::Other(format!("tensor {name}: dimension overflow")))?;
             }
-            let mut buf = vec![0u8; total * 4];
+            let byte_len = total
+                .checked_mul(4)
+                .ok_or_else(|| Error::Other(format!("tensor {name}: byte length overflow")))?;
+            if byte_len > MAX_TENSOR_BYTES {
+                return Err(Error::Other(format!(
+                    "tensor {name}: {byte_len} bytes exceeds the {MAX_TENSOR_BYTES}-byte cap"
+                )));
+            }
+            let mut buf = vec![0u8; byte_len];
             reader
                 .read_exact(&mut buf)
                 .map_err(|err| Error::Other(format!("read data for {name}: {err}")))?;
@@ -105,8 +138,8 @@ impl MlpPredictor {
         }
 
         let mut p = MlpPredictor::default();
-        // Derived config first (Go reads it from the tensor map before
-        // moving the data out).
+        // Derived config first, read from the tensor map before the data is
+        // moved out.
         match tensors.get("fusion_fc.weight") {
             Some(t) if t.dims.len() == 2 => {
                 let input_dim = t.dims[1] as usize;
@@ -127,9 +160,9 @@ impl MlpPredictor {
             tensors.contains_key("output_scale.weight") || p.output_dim == V2_NUM_WEIGHTS + 1;
 
         let fused_dim = EMBED_HIDDEN2_DIM + p.aux_dim;
-        // (name, destination, expected length) — the length checks are a
-        // defensive addition over Go (which would panic in predictRaw on a
-        // malformed artifact; lib code here must not panic).
+        // (name, destination, expected length) — lengths are validated up
+        // front: malformed artifacts must error at load time, not panic in
+        // predict_raw.
         let required: [(&str, &mut Vec<f32>, usize); 14] = [
             (
                 "embed_fc1.weight",
@@ -178,23 +211,23 @@ impl MlpPredictor {
         Ok(p)
     }
 
-    /// True once a model artifact has been loaded (Go: `IsLoaded`).
+    /// True once a model artifact has been loaded.
     pub fn is_loaded(&self) -> bool {
         self.loaded
     }
 
-    /// Auxiliary feature dimension expected by the loaded model (Go: `AuxDim`).
+    /// Auxiliary feature dimension expected by the loaded model.
     pub fn aux_dim(&self) -> usize {
         self.aux_dim
     }
 
-    /// Output dimension of the loaded model (Go: `OutputDim`).
+    /// Output dimension of the loaded model.
     pub fn output_dim(&self) -> usize {
         self.output_dim
     }
 
-    /// Raw V2 prediction (Go: `PredictV2`): returns (weights, scale, intent).
-    /// Unloaded predictor returns the Go fallback (0.6 / 0.25 / 0.15 over
+    /// Raw V2 prediction: returns (weights, scale, intent).
+    /// An unloaded predictor returns the fallback (0.6 / 0.25 / 0.15 over
     /// `V2_NUM_WEIGHTS` slots, scale 1.0, "semantic"). Scale 0 is coerced to
     /// 1.0. Intent is `predicted_intent(weights[0], weights[1], weights[2])`.
     pub fn predict_v2(
@@ -204,9 +237,9 @@ impl MlpPredictor {
     ) -> (Vec<f64>, f64, &'static str) {
         if !self.is_loaded() {
             let mut weights = vec![0f64; V2_NUM_WEIGHTS];
-            weights[V2_WEIGHT_COSINE] = 0.6;
-            weights[V2_WEIGHT_RECENCY_LINEAR] = 0.25;
-            weights[V2_WEIGHT_SUBJECT_FREQUENCY] = 0.15;
+            weights[V2_WEIGHT_COSINE] = UNLOADED_FALLBACK_COSINE;
+            weights[V2_WEIGHT_RECENCY_LINEAR] = UNLOADED_FALLBACK_RECENCY_LINEAR;
+            weights[V2_WEIGHT_SUBJECT_FREQUENCY] = UNLOADED_FALLBACK_SUBJECT_FREQUENCY;
             return (weights, 1.0, "semantic");
         }
         let (raw, scale_f) = self.predict_raw(embedding, aux_features);
@@ -222,8 +255,8 @@ impl MlpPredictor {
         (weights, scale, intent)
     }
 
-    /// Go `predictRaw`. Embeddings shorter than 768 are zero-padded
-    /// (Go would panic; this port stays panic-free).
+    /// The forward pass. Short query embeddings are zero-padded to 768 —
+    /// this function must stay panic-free on any input.
     fn predict_raw(
         &self,
         embedding: &[f32],
@@ -301,9 +334,9 @@ impl MlpPredictor {
 
 #[async_trait]
 impl WeightPredictor for MlpPredictor {
-    /// Go `MLPPredictor.Predict`: unloaded -> defaults; otherwise extract aux
-    /// features from `features.query` (+ now + query embedding), run
-    /// `predict_v2`, and map via [`weights_from_slice`].
+    /// Unloaded -> defaults; otherwise extract aux features from
+    /// `features.query` (+ now + query embedding), run `predict_v2`, and map
+    /// via [`weights_from_slice`].
     async fn predict(&self, features: &Features) -> Result<Weights> {
         if !self.is_loaded() {
             return Ok(default_weights());
@@ -321,7 +354,7 @@ impl WeightPredictor for MlpPredictor {
     }
 }
 
-/// Maps a raw weight slice + scale onto [`Weights`] (Go: `WeightsFromSlice`).
+/// Maps a raw weight slice + scale onto [`Weights`].
 /// Missing entries keep their [`default_weights`] values; scale 0 -> 1.
 pub fn weights_from_slice(weights: &[f64], scale: f64) -> Weights {
     let mut out = default_weights();
@@ -379,7 +412,7 @@ fn read_u32(reader: &mut impl Read, what: &str) -> Result<u32> {
     Ok(u32::from_le_bytes(buf))
 }
 
-/// `y = W x + b` with row-major `W[out_dim][in_dim]` (Go: `linearForward`).
+/// `y = W x + b` with row-major `W[out_dim][in_dim]`.
 fn linear_forward(w: &[f32], b: &[f32], x: &[f32], out_dim: usize, in_dim: usize) -> Vec<f32> {
     let mut y = vec![0f32; out_dim];
     for (i, yi) in y.iter_mut().enumerate() {
@@ -393,7 +426,7 @@ fn linear_forward(w: &[f32], b: &[f32], x: &[f32], out_dim: usize, in_dim: usize
     y
 }
 
-/// In-place layer normalization with gamma/beta (Go: `layerNorm`).
+/// In-place layer normalization with gamma/beta.
 fn layer_norm(x: &mut [f32], gamma: &[f32], beta: &[f32]) {
     let n = x.len() as f32;
     let mean: f32 = x.iter().sum::<f32>() / n;
@@ -412,7 +445,7 @@ fn relu(x: &mut [f32]) {
     }
 }
 
-/// In-place numerically stable softmax (Go: `softmax`).
+/// In-place numerically stable softmax.
 fn softmax(x: &mut [f32]) {
     if x.is_empty() {
         return;
@@ -437,7 +470,7 @@ mod tests {
     use chrono::TimeZone;
     use chrono::Utc;
 
-    /// Port of Go `writeMockModel`.
+    /// Builds a minimal valid model artifact with constant-filled tensors.
     fn write_mock_model(aux_dim: usize, output_dim: usize, with_scale_tensor: bool) -> Vec<u8> {
         struct T {
             name: &'static str,
@@ -533,7 +566,7 @@ mod tests {
         buf
     }
 
-    /// Port of Go `TestMLPPredictorLoadV2Shape`.
+    /// A V2-shaped artifact loads with the expected aux/output dims.
     #[test]
     fn load_v2_shape() {
         let model = write_mock_model(AUX_FEATURE_DIM, V2_NUM_WEIGHTS + 1, true);
@@ -543,7 +576,7 @@ mod tests {
         assert_eq!(p.output_dim(), V2_NUM_WEIGHTS + 1);
     }
 
-    /// Port of Go `TestMLPPredictorPredictImplementsWeightPredictor`.
+    /// `predict` through the `WeightPredictor` trait populates weights.
     #[tokio::test]
     async fn predict_implements_weight_predictor() {
         let model = write_mock_model(AUX_FEATURE_DIM, V2_NUM_WEIGHTS + 1, true);
@@ -594,7 +627,7 @@ mod tests {
         let w = weights_from_slice(&[0.5, 0.3], 0.0);
         assert_eq!(w.cosine, 0.5);
         assert_eq!(w.recency_linear, 0.3);
-        // Missing entries keep DefaultWeights values.
+        // Missing entries keep default_weights() values.
         assert_eq!(w.subject_frequency, default_weights().subject_frequency);
         assert_eq!(w.scale, 1.0, "scale 0 coerces to 1");
 

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: MIT
 //! Subcommand handlers. Each file owns one subcommand's implementation.
 
 pub mod chat;

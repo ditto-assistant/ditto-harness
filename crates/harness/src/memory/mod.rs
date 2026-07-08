@@ -1,7 +1,6 @@
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: MIT
 //! Memory store: ingestion, fetch, vector search, composite search, subject
 //! search, subject-scoped memory search, prompt context, and slim payloads.
-//! Port of Go `pkg/memory`.
 
 pub mod prompt_context;
 pub mod slim;
@@ -32,15 +31,15 @@ pub use slim::{
 };
 pub use tools::{memory_tools, memory_tools_with, ToolOptions};
 
-/// Default result limit for searches (Go hardcodes 8).
+/// Default result limit for searches.
 pub const DEFAULT_SEARCH_LIMIT: usize = 8;
-/// Default minimum similarity for memory searches (Go: 0.15).
+/// Default minimum similarity for memory searches.
 pub const DEFAULT_MIN_SIMILARITY: f64 = 0.15;
-/// Default minimum similarity for subject searches (Go: 0.10).
+/// Default minimum similarity for subject searches.
 pub const DEFAULT_SUBJECT_MIN_SIMILARITY: f64 = 0.10;
 
 /// Memory store backed by [`Db`] plus an [`Embedder`] and optional learned
-/// [`WeightPredictor`] (Go: `memory.Store`). Cheap to clone.
+/// [`WeightPredictor`]. Cheap to clone.
 #[derive(Clone)]
 pub struct Store {
     db: Arc<Db>,
@@ -49,7 +48,7 @@ pub struct Store {
     reranker: Option<Arc<dyn retrieval::Reranker>>,
 }
 
-/// Constructor options for [`Store::new`] (Go: `memory.Options`).
+/// Constructor options for [`Store::new`].
 #[derive(Clone)]
 pub struct StoreOptions {
     pub db: Arc<Db>,
@@ -57,13 +56,13 @@ pub struct StoreOptions {
     /// `None` -> default weights + "semantic" intent in composite search.
     pub predictor: Option<Arc<dyn WeightPredictor>>,
     /// Optional second-stage reranker applied to the composite pool. `None` ->
-    /// composite order is returned as-is (Go production: cross-encoder rerank).
+    /// composite order is returned as-is (production setups use a
+    /// cross-encoder rerank).
     pub reranker: Option<Arc<dyn retrieval::Reranker>>,
 }
 
-/// Subject attached to a saved memory (Go: `SubjectInput`). Tool args use
-/// lowercase keys; Go-marshaled payloads (`Text`, ...) are accepted as
-/// aliases.
+/// Subject attached to a saved memory. Tool args use lowercase keys; legacy
+/// wire payloads with capitalized keys (`Text`, ...) are accepted as aliases.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SubjectInput {
     #[serde(default, alias = "Text")]
@@ -74,7 +73,7 @@ pub struct SubjectInput {
     pub key: bool,
 }
 
-/// Request for [`Store::save_memory`] (Go: `SaveMemoryRequest`).
+/// Request for [`Store::save_memory`].
 /// Defaults applied by the store: empty `kg_id` -> `kg_id(user_id)`, empty
 /// `id` -> new uuid v4, `timestamp: None` -> now (UTC).
 #[derive(Debug, Clone, Default)]
@@ -99,7 +98,7 @@ pub struct SaveMemoryRequest {
     pub subjects: Vec<SubjectInput>,
 }
 
-/// Request for [`Store::search_memories`] (Go: `SearchMemoriesRequest`).
+/// Request for [`Store::search_memories`].
 /// Defaults: `limit` 0 -> 8, `min_similarity` 0 -> 0.15, empty `kg_id` ->
 /// derived.
 #[derive(Debug, Clone, Default)]
@@ -114,8 +113,7 @@ pub struct SearchMemoriesRequest {
     pub exclude_pair_ids: Vec<String>,
 }
 
-/// Request for [`Store::search_composite_memories`]
-/// (Go: `CompositeSearchRequest`). Defaults: `limit` 0 -> 8,
+/// Request for [`Store::search_composite_memories`]. Defaults: `limit` 0 -> 8,
 /// `candidate_pool_size` 0 -> `max(32, limit*4)`, `variant` default Legacy.
 #[derive(Debug, Clone, Default)]
 pub struct CompositeSearchRequest {
@@ -131,7 +129,7 @@ pub struct CompositeSearchRequest {
     pub log_event: bool,
 }
 
-/// Request for [`Store::search_subjects`] (Go: `SearchSubjectsRequest`).
+/// Request for [`Store::search_subjects`].
 /// Defaults: `limit` 0 -> 8, `min_similarity` 0 -> 0.10.
 #[derive(Debug, Clone, Default)]
 pub struct SearchSubjectsRequest {
@@ -142,16 +140,14 @@ pub struct SearchSubjectsRequest {
     pub min_similarity: f64,
 }
 
-/// One subject-scoped query (Go: `SubjectMemoryQuery`). JSON tags match Go:
-/// `subject_id`, `query`.
+/// One subject-scoped query. Wire JSON keys are `subject_id` and `query`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SubjectMemoryQuery {
     pub subject_id: String,
     pub query: String,
 }
 
-/// Request for [`Store::search_memories_in_subjects`]
-/// (Go: `SearchMemoriesInSubjectsRequest`). Defaults: `limit` 0 -> 8,
+/// Request for [`Store::search_memories_in_subjects`]. Defaults: `limit` 0 -> 8,
 /// `min_similarity` 0 -> 0.15.
 #[derive(Debug, Clone, Default)]
 pub struct SearchMemoriesInSubjectsRequest {
@@ -161,7 +157,7 @@ pub struct SearchMemoriesInSubjectsRequest {
     pub min_similarity: f64,
 }
 
-/// Request for [`Store::fetch_memories`] (Go: `FetchMemoriesRequest`).
+/// Request for [`Store::fetch_memories`].
 #[derive(Debug, Clone, Default)]
 pub struct FetchMemoriesRequest {
     pub user_id: String,
@@ -169,8 +165,8 @@ pub struct FetchMemoriesRequest {
     pub pair_ids: Vec<String>,
 }
 
-/// Request for [`Store::list_recent_memories`]
-/// (Go: `ListRecentMemoriesRequest`). `limit <= 0` returns an empty list;
+/// Request for [`Store::list_recent_memories`].
+/// `limit <= 0` returns an empty list;
 /// empty `session_id` resolves to "main".
 #[derive(Debug, Clone, Default)]
 pub struct ListRecentMemoriesRequest {
@@ -182,7 +178,7 @@ pub struct ListRecentMemoriesRequest {
 }
 
 impl Store {
-    /// Creates a store (Go: `memory.NewStore`).
+    /// Creates a store.
     pub fn new(opts: StoreOptions) -> Store {
         Store {
             db: opts.db,
@@ -199,8 +195,7 @@ impl Store {
 
     /// Saves a memory pair: embeds `prompt\nresponse\nsummary`, upserts the
     /// user and pair, then embeds/upserts/links each non-empty subject.
-    /// Returns the stored memory (Go: `Store.SaveMemory`). Errors if
-    /// `user_id` is blank.
+    /// Returns the stored memory. Errors if `user_id` is blank.
     pub async fn save_memory(&self, mut req: SaveMemoryRequest) -> Result<Memory> {
         if req.user_id.trim().is_empty() {
             return Err(Error::InvalidArgument(
@@ -250,9 +245,17 @@ impl Store {
             })
             .await?;
 
-        if !req.subjects.is_empty() {
-            let subject_texts: Vec<String> = req
-                .subjects
+        // Skip blank subjects up front: `embed_texts` silently drops blank
+        // inputs, so embedding the raw list would shift every later subject
+        // onto the wrong embedding. Filtering first keeps `subjects` and
+        // `subject_embeddings` parallel.
+        let subjects: Vec<_> = req
+            .subjects
+            .iter()
+            .filter(|subj| !subj.text.trim().is_empty())
+            .collect();
+        if !subjects.is_empty() {
+            let subject_texts: Vec<String> = subjects
                 .iter()
                 .map(|subj| {
                     format!("{}\n{}", subj.text, subj.description)
@@ -261,10 +264,7 @@ impl Store {
                 })
                 .collect();
             let subject_embeddings = self.embed_texts(&subject_texts).await?;
-            for (i, subj) in req.subjects.iter().enumerate() {
-                if subj.text.trim().is_empty() {
-                    continue;
-                }
+            for (i, subj) in subjects.iter().enumerate() {
                 let srow = self
                     .db
                     .upsert_subject(UpsertSubjectParams {
@@ -286,8 +286,7 @@ impl Store {
     }
 
     /// Vector search across one or more queries, de-duplicating results by
-    /// pair id (excluded ids are pre-seeded) and tagging `similarity`
-    /// (Go: `Store.SearchMemories`).
+    /// pair id (excluded ids are pre-seeded) and tagging `similarity`.
     pub async fn search_memories(&self, mut req: SearchMemoriesRequest) -> Result<Vec<Memory>> {
         if req.kg_id.is_empty() {
             req.kg_id = crate::types::kg_id(&req.user_id);
@@ -330,8 +329,7 @@ impl Store {
     /// Uses the predictor when present ("learned" intent) else default
     /// weights ("semantic"). Returns scored memories ordered by composite
     /// score plus the retrieval metadata describing weights/variant/pair ids
-    /// (Go: `Store.SearchCompositeMemories`; metadata
-    /// `query_embedding_model` is "host").
+    /// (metadata `query_embedding_model` is "host").
     pub async fn search_composite_memories(
         &self,
         mut req: CompositeSearchRequest,
@@ -343,8 +341,7 @@ impl Store {
             req.limit = DEFAULT_SEARCH_LIMIT;
         }
         // When a reranker is set, retrieve a WIDER composite pool, rerank it,
-        // then truncate to the caller's limit (Go production: retrieveLimit =
-        // max(rootCount, ceRerankPoolSize)).
+        // then truncate to the caller's limit.
         let requested_limit = req.limit;
         let pool_limit = if self.reranker.is_some() {
             retrieval::RERANK_POOL_SIZE.max(requested_limit)
@@ -352,25 +349,14 @@ impl Store {
             requested_limit
         };
         if req.candidate_pool_size == 0 {
-            req.candidate_pool_size = 32.max(pool_limit * 4);
+            req.candidate_pool_size = retrieval::default_candidate_pool_size(pool_limit);
         }
         let embed_resp = self.embed_texts(std::slice::from_ref(&req.query)).await?;
         let embedding = embedding_at(&embed_resp, 0).unwrap_or_default();
 
-        let mut weights = retrieval::default_weights();
-        let mut intent = "semantic";
-        if let Some(predictor) = &self.predictor {
-            weights = predictor
-                .predict(&retrieval::Features {
-                    query: req.query.clone(),
-                    now: Some(Utc::now()),
-                    query_embedding: embedding.clone(),
-                    current_session_id: req.session_id.clone(),
-                    ..retrieval::Features::default()
-                })
-                .await?;
-            intent = "learned";
-        }
+        let (weights, intent) = self
+            .predict_weights(&req.query, &embedding, &req.session_id)
+            .await?;
 
         let results = retrieval::composite_retrieve(
             &self.db,
@@ -416,7 +402,8 @@ impl Store {
         }
 
         // Second stage: rerank the composite pool, then truncate to the
-        // caller's limit (Go production: cross-encoder rerank + RRF fusion).
+        // caller's limit (production setups use a cross-encoder rerank + RRF
+        // fusion).
         // `memories` arrive ordered best-first by composite score.
         if let Some(reranker) = &self.reranker {
             memories = reranker
@@ -425,28 +412,35 @@ impl Store {
         }
         let retrieved_pair_ids: Vec<String> = memories.iter().map(|m| m.id.clone()).collect();
 
-        let mut weight_map = std::collections::BTreeMap::new();
-        weight_map.insert("cosine".to_string(), weights.cosine);
-        weight_map.insert("recencyLinear".to_string(), weights.recency_linear);
-        weight_map.insert("recencyExp".to_string(), weights.recency_exp);
-        weight_map.insert("subjectFrequency".to_string(), weights.subject_frequency);
-        weight_map.insert("subjectSemMatch".to_string(), weights.subject_sem_match);
-        weight_map.insert("sessionContinuity".to_string(), weights.session_continuity);
-        weight_map.insert("neighborDensity".to_string(), weights.neighbor_density);
-        weight_map.insert("scale".to_string(), weights.scale);
-        let metadata = RetrievalMetadata {
-            intent: intent.to_string(),
-            weights: weight_map,
-            scale: weights.scale,
-            variant: req.variant.to_string(),
-            retrieved_pair_ids,
-            query_embedding_model: "host".to_string(),
-        };
+        let metadata = build_retrieval_metadata(intent, weights, req.variant, retrieved_pair_ids);
         Ok((memories, Some(metadata)))
     }
 
-    /// Vector search over the subject graph, de-duplicated across queries
-    /// (Go: `Store.SearchSubjects`).
+    /// Predicts composite fusion weights for a query: the configured
+    /// predictor when present ("learned" intent), else
+    /// [`retrieval::default_weights`] ("semantic").
+    async fn predict_weights(
+        &self,
+        query: &str,
+        embedding: &[f32],
+        session_id: &str,
+    ) -> Result<(retrieval::Weights, &'static str)> {
+        let Some(predictor) = &self.predictor else {
+            return Ok((retrieval::default_weights(), "semantic"));
+        };
+        let weights = predictor
+            .predict(&retrieval::Features {
+                query: query.to_string(),
+                now: Some(Utc::now()),
+                query_embedding: embedding.to_vec(),
+                current_session_id: session_id.to_string(),
+                ..retrieval::Features::default()
+            })
+            .await?;
+        Ok((weights, "learned"))
+    }
+
+    /// Vector search over the subject graph, de-duplicated across queries.
     pub async fn search_subjects(&self, mut req: SearchSubjectsRequest) -> Result<Vec<Subject>> {
         if req.kg_id.is_empty() {
             req.kg_id = crate::types::kg_id(&req.user_id);
@@ -482,8 +476,10 @@ impl Store {
         Ok(out)
     }
 
-    /// Vector search restricted to specific subject ids, de-duplicated
-    /// (Go: `Store.SearchMemoriesInSubjects`). Errors on invalid subject ids.
+    /// Vector search restricted to specific subject ids, de-duplicated.
+    /// Errors on invalid subject ids — but blank-query entries are filtered
+    /// out before validation, so only entries with a non-blank query get
+    /// their subject id validated.
     pub async fn search_memories_in_subjects(
         &self,
         mut req: SearchMemoriesInSubjectsRequest,
@@ -494,16 +490,22 @@ impl Store {
         if req.min_similarity == 0.0 {
             req.min_similarity = DEFAULT_MIN_SIMILARITY;
         }
-        let texts: Vec<String> = req.queries.iter().map(|q| q.query.clone()).collect();
+        // Blank queries are filtered out (with their SubjectMemoryQuery) before
+        // embedding: `embed_texts` silently drops blank inputs, so embedding
+        // the raw list would shift later queries onto the wrong embeddings.
+        let queries: Vec<_> = req
+            .queries
+            .iter()
+            .filter(|q| !q.query.trim().is_empty())
+            .collect();
+        let texts: Vec<String> = queries.iter().map(|q| q.query.clone()).collect();
         let embeddings = self.embed_texts(&texts).await?;
         let mut seen: HashSet<String> = HashSet::new();
         let mut out = Vec::new();
-        for (i, query) in req.queries.iter().enumerate() {
+        for (i, query) in queries.iter().enumerate() {
             uuid::Uuid::parse_str(&query.subject_id).map_err(|err| {
                 Error::InvalidArgument(format!("parse subject id {:?}: {err}", query.subject_id))
             })?;
-            // A missing embedding (blank query dropped by embed_texts) matches
-            // nothing — same outcome as Go's NULL query vector.
             let Some(embedding) = embedding_at(&embeddings, i) else {
                 continue;
             };
@@ -529,13 +531,13 @@ impl Store {
     }
 
     /// Fetches full memories for the given public pair ids, preserving input
-    /// order (Go: `Store.FetchMemories`).
+    /// order.
     pub async fn fetch_memories(&self, req: FetchMemoriesRequest) -> Result<Vec<Memory>> {
         let rows = self.db.fetch_memories(&req.user_id, &req.pair_ids).await?;
         Ok(rows.into_iter().map(memory_from_row).collect())
     }
 
-    /// Lists the newest memories in a session (Go: `Store.ListRecentMemories`).
+    /// Lists the newest memories in a session.
     pub async fn list_recent_memories(
         &self,
         mut req: ListRecentMemoriesRequest,
@@ -563,7 +565,7 @@ impl Store {
     }
 
     /// Drops blank texts, errors when nothing embeddable remains, and calls
-    /// the embedder (Go: `Store.embedTexts`).
+    /// the embedder.
     pub(crate) async fn embed_texts(&self, texts: &[String]) -> Result<EmbedResponse> {
         let clean: Vec<String> = texts
             .iter()
@@ -579,14 +581,42 @@ impl Store {
     }
 }
 
-/// Embedding at `idx`, `None` when out of range (Go: `embeddingAt`).
+/// Embedding at `idx`, `None` when out of range.
 fn embedding_at(resp: &EmbedResponse, idx: usize) -> Option<Vec<f32>> {
     resp.embeddings.get(idx).cloned()
 }
 
-/// Maps a db row to the public [`Memory`] shape (Go: `memoryFromRow`); JSON
-/// columns that fail to parse degrade to empty values, matching Go's ignored
-/// `json.Unmarshal` errors. `similarity` carries through from search rows.
+/// Builds the [`RetrievalMetadata`] describing a composite search: intent,
+/// the camelCase weight map, variant, and the retrieved pair ids
+/// (`query_embedding_model` is "host").
+fn build_retrieval_metadata(
+    intent: &str,
+    weights: retrieval::Weights,
+    variant: retrieval::Variant,
+    retrieved_pair_ids: Vec<String>,
+) -> RetrievalMetadata {
+    let mut weight_map = std::collections::BTreeMap::new();
+    weight_map.insert("cosine".to_string(), weights.cosine);
+    weight_map.insert("recencyLinear".to_string(), weights.recency_linear);
+    weight_map.insert("recencyExp".to_string(), weights.recency_exp);
+    weight_map.insert("subjectFrequency".to_string(), weights.subject_frequency);
+    weight_map.insert("subjectSemMatch".to_string(), weights.subject_sem_match);
+    weight_map.insert("sessionContinuity".to_string(), weights.session_continuity);
+    weight_map.insert("neighborDensity".to_string(), weights.neighbor_density);
+    weight_map.insert("scale".to_string(), weights.scale);
+    RetrievalMetadata {
+        intent: intent.to_string(),
+        weights: weight_map,
+        scale: weights.scale,
+        variant: variant.to_string(),
+        retrieved_pair_ids,
+        query_embedding_model: "host".to_string(),
+    }
+}
+
+/// Maps a db row to the public [`Memory`] shape; JSON columns that fail to
+/// parse degrade to empty values rather than erroring. `similarity` carries
+/// through from search rows.
 pub(crate) fn memory_from_row(row: MemoryPairRow) -> Memory {
     let input = row
         .input
@@ -632,7 +662,7 @@ pub(crate) fn memory_from_row(row: MemoryPairRow) -> Memory {
     }
 }
 
-/// Maps a subject row to the public [`Subject`] shape (Go: `subjectFromSearch`).
+/// Maps a subject row to the public [`Subject`] shape.
 fn subject_from_row(row: SubjectRow) -> Subject {
     Subject {
         id: row.id,
@@ -649,7 +679,7 @@ fn subject_from_row(row: SubjectRow) -> Subject {
 
 #[cfg(test)]
 pub(crate) mod test_support {
-    //! Shared fakes for memory tests (port of Go's `HashEmbedder`).
+    //! Shared fakes for memory tests.
 
     use std::hash::{Hash, Hasher};
     use std::sync::Arc;
@@ -712,7 +742,8 @@ mod tests {
     use super::*;
     use crate::types::Content;
 
-    /// Port of Go `TestStoreSaveSearchFetchAndSubjects`.
+    /// End-to-end store flow: save a memory with a subject, then find it via
+    /// vector search, subject search, subject-scoped search, and fetch.
     #[tokio::test]
     async fn store_save_search_fetch_and_subjects() {
         let store = new_test_store().await;
@@ -830,6 +861,125 @@ mod tests {
             .await
             .expect_err("invalid subject id must fail");
         assert!(err.to_string().contains("parse subject id"), "{err}");
+    }
+
+    /// Regression: a blank subject in the middle of the list must not shift
+    /// later subjects onto the wrong embeddings (embed_texts drops blanks).
+    #[tokio::test]
+    async fn save_memory_blank_subject_keeps_later_embeddings_aligned() {
+        let store = new_test_store().await;
+        store
+            .save_memory(SaveMemoryRequest {
+                user_id: "user-align".to_string(),
+                prompt: "prompt".to_string(),
+                response: "response".to_string(),
+                subjects: vec![
+                    SubjectInput {
+                        text: "alpha topic".to_string(),
+                        description: String::new(),
+                        key: false,
+                    },
+                    SubjectInput {
+                        text: "   ".to_string(),
+                        description: String::new(),
+                        key: false,
+                    },
+                    SubjectInput {
+                        text: "gamma subject".to_string(),
+                        description: String::new(),
+                        key: false,
+                    },
+                    SubjectInput {
+                        text: "delta theme".to_string(),
+                        description: String::new(),
+                        key: false,
+                    },
+                ],
+                ..SaveMemoryRequest::default()
+            })
+            .await
+            .expect("save_memory");
+
+        // Each non-blank subject must be retrievable by its own text with a
+        // near-exact match (the hash embedder maps equal text to equal
+        // vectors). With misaligned embeddings, "gamma subject" would carry
+        // "delta theme"'s vector and this search would miss it.
+        for text in ["alpha topic", "gamma subject", "delta theme"] {
+            let subjects = store
+                .search_subjects(SearchSubjectsRequest {
+                    user_id: "user-align".to_string(),
+                    queries: vec![text.to_string()],
+                    limit: 1,
+                    min_similarity: 0.9,
+                    ..SearchSubjectsRequest::default()
+                })
+                .await
+                .expect("search_subjects");
+            assert_eq!(
+                subjects.len(),
+                1,
+                "subject {text:?} not found by its own text"
+            );
+            assert_eq!(subjects[0].text, text);
+        }
+    }
+
+    /// Regression: a blank query in the middle of the list must not shift
+    /// later queries onto the wrong embeddings (embed_texts drops blanks).
+    #[tokio::test]
+    async fn search_memories_in_subjects_blank_query_keeps_alignment() {
+        let store = new_test_store().await;
+        store
+            .save_memory(SaveMemoryRequest {
+                user_id: "user-align".to_string(),
+                prompt: "orbital mechanics notes".to_string(),
+                response: "hohmann transfer details".to_string(),
+                subjects: vec![SubjectInput {
+                    text: "rocketry".to_string(),
+                    description: String::new(),
+                    key: false,
+                }],
+                ..SaveMemoryRequest::default()
+            })
+            .await
+            .expect("save_memory");
+        let subjects = store
+            .search_subjects(SearchSubjectsRequest {
+                user_id: "user-align".to_string(),
+                queries: vec!["rocketry".to_string()],
+                limit: 1,
+                ..SearchSubjectsRequest::default()
+            })
+            .await
+            .expect("search_subjects");
+        assert_eq!(subjects.len(), 1);
+        let subject_id = subjects[0].id.clone();
+
+        // A blank first query used to consume the real query's embedding,
+        // leaving the real query with no embedding at all.
+        let got = store
+            .search_memories_in_subjects(SearchMemoriesInSubjectsRequest {
+                user_id: "user-align".to_string(),
+                queries: vec![
+                    SubjectMemoryQuery {
+                        subject_id: subject_id.clone(),
+                        query: "   ".to_string(),
+                    },
+                    SubjectMemoryQuery {
+                        subject_id,
+                        query: "orbital mechanics notes".to_string(),
+                    },
+                ],
+                ..SearchMemoriesInSubjectsRequest::default()
+            })
+            .await
+            .expect("search_memories_in_subjects");
+        assert_eq!(
+            got.len(),
+            1,
+            "real query after a blank one must still match"
+        );
+        assert_eq!(got[0].prompt, "orbital mechanics notes");
     }
 
     #[tokio::test]

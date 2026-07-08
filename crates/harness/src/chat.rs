@@ -1,7 +1,6 @@
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: MIT
 //! Chat harness facade: prepares memory context, combines injected tools with
 //! memory tools, runs the agent loop, and saves the resulting memory pair.
-//! Port of Go `pkg/chatv2`.
 
 use std::sync::Arc;
 
@@ -20,7 +19,7 @@ use crate::types::{
     MAIN_SESSION_ID,
 };
 
-/// Chat harness (Go: `chatv2.Harness`).
+/// Chat harness.
 pub struct Harness {
     model: Arc<dyn Model>,
     memory: Option<Arc<Store>>,
@@ -28,7 +27,7 @@ pub struct Harness {
     include_memory_tools: bool,
 }
 
-/// Constructor options (Go: `chatv2.Options`).
+/// Constructor options.
 pub struct Options {
     pub model: Arc<dyn Model>,
     pub memory: Option<Arc<Store>>,
@@ -39,7 +38,7 @@ pub struct Options {
     pub include_memory_tools: bool,
 }
 
-/// Request for [`Harness::prepare`] (Go: `chatv2.PrepareRequest`).
+/// Request for [`Harness::prepare`].
 /// Defaults: empty `kg_id` -> derived, empty `session_id` -> "main".
 #[derive(Debug, Clone, Default)]
 pub struct PrepareRequest {
@@ -50,8 +49,8 @@ pub struct PrepareRequest {
     pub user_input: String,
     /// Prepended as a system message when non-blank.
     pub system_prompt: String,
-    /// Existing conversation; when empty, `user_input` becomes the first
-    /// user message.
+    /// Existing conversation; when it contains no non-system messages,
+    /// `user_input` becomes the first user message.
     pub messages: Vec<ChatMessage>,
     pub long_term_limit: usize,
     pub short_term_limit: usize,
@@ -60,10 +59,19 @@ pub struct PrepareRequest {
     pub variant: Variant,
     pub request_path: String,
     pub log_retrieval: bool,
+    /// Selects the long-term retrieval path. **Defaults to false**: plain
+    /// vector search, bypassing composite scoring, the [`WeightPredictor`]
+    /// (learned weights), and the [`Reranker`] entirely — the subject graph
+    /// contributes nothing to ranking. Set true to route through
+    /// `Store::search_composite_memories` (the full production-parity stack;
+    /// the DittoBench reference baseline runs with true).
+    ///
+    /// [`WeightPredictor`]: crate::retrieval::WeightPredictor
+    /// [`Reranker`]: crate::retrieval::Reranker
     pub use_composite: bool,
 }
 
-/// Result of preparation (Go: `chatv2.PrepareResult`). JSON matches Go.
+/// Result of preparation. JSON field names match the original wire format.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PrepareResult {
@@ -76,8 +84,7 @@ pub struct PrepareResult {
     pub already_found_pair_ids: Vec<String>,
 }
 
-/// Request for [`Harness::run`] (Go: `chatv2.RunRequest`, which embeds
-/// `PrepareRequest`).
+/// Request for [`Harness::run`]: a [`PrepareRequest`] plus run options.
 #[derive(Debug, Clone, Default)]
 pub struct RunRequest {
     pub prepare: PrepareRequest,
@@ -92,11 +99,11 @@ pub struct RunRequest {
     pub subjects: Vec<SubjectInput>,
 }
 
-/// Result of a full run (Go: `chatv2.RunResult`, which embeds
-/// `agent.RunResult`).
+/// Result of a full run: an [`agent::RunResult`] plus preparation and
+/// saved-memory details.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RunResult {
-    /// Flattened in JSON like Go's embedded struct.
+    /// Flattened in JSON.
     #[serde(flatten)]
     pub result: agent::RunResult,
     #[serde(default, skip_serializing_if = "is_default_preparation")]
@@ -110,7 +117,7 @@ fn is_default_preparation(p: &PromptMemoryResponse) -> bool {
 }
 
 impl Harness {
-    /// Creates a harness (Go: `chatv2.New`).
+    /// Creates a harness.
     pub fn new(opts: Options) -> Harness {
         Harness {
             model: opts.model,
@@ -124,7 +131,7 @@ impl Harness {
     /// first user message when the history is empty), retrieves prompt
     /// memories when memory + user input are present, inserts the memory
     /// context message after the leading system messages, and returns
-    /// messages + tool definitions + memories (Go: `Harness.Prepare`).
+    /// messages + tool definitions + memories.
     /// Errors when `user_id` is empty.
     pub async fn prepare(&self, req: PrepareRequest) -> Result<PrepareResult> {
         if req.user_id.is_empty() {
@@ -133,12 +140,9 @@ impl Harness {
             ));
         }
         let mut req = req;
-        if req.kg_id.is_empty() {
-            req.kg_id = kg_id(&req.user_id);
-        }
-        if req.session_id.is_empty() {
-            req.session_id = MAIN_SESSION_ID.to_string();
-        }
+        let (resolved_kg_id, resolved_session_id) = resolve_ids(&req);
+        req.kg_id = resolved_kg_id;
+        req.session_id = resolved_session_id;
         let mut messages = normalize_messages(&req.messages, &req.user_input, &req.system_prompt);
 
         let mut memories = PromptMemoryResponse::default();
@@ -178,18 +182,19 @@ impl Harness {
 
     /// Prepares, runs the agent loop with combined tools, and (with
     /// `save_memory`) persists the final exchange with seed/retrieval
-    /// metadata from preparation (Go: `Harness.Run`). The saved memory's
+    /// metadata from preparation. The saved memory's
     /// input is the last user message content (falling back to
     /// `user_input`), output is the final text, source defaults to "chatv2".
     pub async fn run(&self, req: RunRequest, handler: &dyn EventHandler) -> Result<RunResult> {
         let prepared = self.prepare(req.prepare.clone()).await?;
+        let (resolved_kg_id, resolved_session_id) = resolve_ids(&req.prepare);
         let agent_loop = self.agent_loop(&req.prepare);
         let result = agent_loop
             .run_streaming(
                 agent::RunRequest {
                     user_id: req.prepare.user_id.clone(),
-                    kg_id: req.prepare.kg_id.clone(),
-                    session_id: req.prepare.session_id.clone(),
+                    kg_id: resolved_kg_id.clone(),
+                    session_id: resolved_session_id.clone(),
                     messages: prepared.messages.clone(),
                     max_turns: req.max_turns,
                     save_memory: false,
@@ -204,8 +209,8 @@ impl Harness {
                 let mem = store
                     .save_memory(SaveMemoryRequest {
                         user_id: req.prepare.user_id.clone(),
-                        kg_id: first_non_empty(&req.prepare.kg_id, &kg_id(&req.prepare.user_id)),
-                        session_id: first_non_empty(&req.prepare.session_id, MAIN_SESSION_ID),
+                        kg_id: resolved_kg_id,
+                        session_id: resolved_session_id,
                         prompt: req.prepare.user_input.clone(),
                         response: result.text.clone(),
                         input: last_user_input(&prepared.messages, &req.prepare.user_input),
@@ -231,7 +236,7 @@ impl Harness {
     }
 
     /// An agent loop wired with this harness's model and the combined tools
-    /// for the request's user/kg ids (Go: `Harness.Loop`).
+    /// for the request's user/kg ids.
     pub fn agent_loop(&self, req: &PrepareRequest) -> agent::Loop {
         agent::Loop::new(agent::Options {
             model: Arc::clone(&self.model),
@@ -241,7 +246,7 @@ impl Harness {
     }
 
     /// Injected host tools plus (when enabled) the standard memory tools for
-    /// the given user/kg ids (Go: `Harness.toolsFor`).
+    /// the given user/kg ids.
     fn tools_for(&self, user_id: &str, kg_id: &str) -> Vec<Arc<dyn Tool>> {
         let mut tools: Vec<Arc<dyn Tool>> = self.tools.to_vec();
         if self.include_memory_tools {
@@ -257,8 +262,7 @@ impl Harness {
     }
 }
 
-/// Builds the system message carrying memory context (Go:
-/// `chatv2.MemoryContextMessage`): role "system", text
+/// Builds the system message carrying memory context: role "system", text
 /// `"Relevant memory context for this turn:\n" + JSON` where the JSON object
 /// holds `longTerm` (the raw `long_term_json` payload) and `shortTerm`
 /// (compact entries: pairID, timestamp, title, optional summary). Returns
@@ -269,16 +273,25 @@ pub fn memory_context_message(memories: &PromptMemoryResponse) -> Option<ChatMes
     }
     let mut payload = serde_json::Map::new();
     if !memories.long_term.is_empty() {
-        // Embedded as raw JSON, like Go's json.RawMessage; invalid JSON
-        // mirrors Go's marshal failure (no message).
-        let raw: Value = serde_json::from_str(&memories.long_term_json).ok()?;
-        payload.insert("longTerm".to_string(), raw);
+        // Embedded as raw JSON. A malformed long-term payload must not drop
+        // the short-term context too, so log and fall through.
+        match serde_json::from_str::<Value>(&memories.long_term_json) {
+            Ok(raw) => {
+                payload.insert("longTerm".to_string(), raw);
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "memory context: long_term_json failed to parse; emitting short-term context only");
+            }
+        }
     }
     if !memories.short_term.is_empty() {
         payload.insert(
             "shortTerm".to_string(),
             Value::Array(compact_memories(&memories.short_term)),
         );
+    }
+    if payload.is_empty() {
+        return None;
     }
     let raw = serde_json::to_string(&Value::Object(payload)).ok()?;
     Some(ChatMessage {
@@ -291,7 +304,8 @@ pub fn memory_context_message(memories: &PromptMemoryResponse) -> Option<ChatMes
 }
 
 /// Prepends the system prompt (when non-blank) and seeds the conversation
-/// with `user_input` when the history is empty (Go: `normalizeMessages`).
+/// with `user_input` when there are no non-system messages, so the model
+/// always sees the user's turn even when a system prompt is set.
 fn normalize_messages(
     messages: &[ChatMessage],
     user_input: &str,
@@ -306,7 +320,8 @@ fn normalize_messages(
         });
     }
     out.extend_from_slice(messages);
-    if out.is_empty() && !user_input.trim().is_empty() {
+    let has_non_system = out.iter().any(|msg| msg.role != "system");
+    if !has_non_system && !user_input.trim().is_empty() {
         out.push(ChatMessage {
             role: "user".to_string(),
             content: vec![Content::text(user_input)],
@@ -317,7 +332,9 @@ fn normalize_messages(
 }
 
 /// Inserts `msg` before the first non-system message at index > 0, else
-/// appends it (Go: `insertAfterSystem`).
+/// appends it. The `i > 0` guard means a history with no system prompt (a
+/// non-system message at index 0) gets the memory context appended after it
+/// rather than prepended — upstream-parity behavior kept deliberately.
 fn insert_after_system(messages: Vec<ChatMessage>, msg: ChatMessage) -> Vec<ChatMessage> {
     let mut out = Vec::with_capacity(messages.len() + 1);
     let mut inserted = false;
@@ -334,9 +351,8 @@ fn insert_after_system(messages: Vec<ChatMessage>, msg: ChatMessage) -> Vec<Chat
     out
 }
 
-/// Compact short-term entries for the memory context payload
-/// (Go: `compactMemories`): pairID, timestamp (RFC3339), title, optional
-/// summary.
+/// Compact short-term entries for the memory context payload: pairID,
+/// timestamp (RFC3339), title, optional summary.
 fn compact_memories(memories: &[Memory]) -> Vec<Value> {
     memories
         .iter()
@@ -357,7 +373,7 @@ fn compact_memories(memories: &[Memory]) -> Vec<Value> {
 }
 
 /// Content of the last user message, falling back to `fallback` as a single
-/// text part (Go: `lastUserInput`).
+/// text part.
 fn last_user_input(messages: &[ChatMessage], fallback: &str) -> Vec<Content> {
     for msg in messages.iter().rev() {
         if msg.role == "user" && !msg.content.is_empty() {
@@ -370,7 +386,18 @@ fn last_user_input(messages: &[ChatMessage], fallback: &str) -> Vec<Content> {
     vec![Content::text(fallback)]
 }
 
-/// First non-empty of the two values (Go: `firstNonEmpty`).
+/// Resolved `(kg_id, session_id)` for a request: an empty `kg_id` derives
+/// from `user_id`, an empty `session_id` falls back to "main". Used by both
+/// `prepare` (which normalizes its own clone) and `run` (which saves against
+/// the caller's request).
+fn resolve_ids(req: &PrepareRequest) -> (String, String) {
+    (
+        first_non_empty(&req.kg_id, &kg_id(&req.user_id)),
+        first_non_empty(&req.session_id, MAIN_SESSION_ID),
+    )
+}
+
+/// First non-empty of the two values.
 fn first_non_empty(value: &str, fallback: &str) -> String {
     if !value.is_empty() {
         value.to_string()
@@ -395,8 +422,7 @@ mod tests {
         ChatChunk, Cost, CostedUsage, EmbedRequest, EmbedResponse, Embedder, Usage,
     };
 
-    /// Scripted model recording the messages/tools of its latest call
-    /// (Go: chatv2 test `scriptedModel`).
+    /// Scripted model recording the messages/tools of its latest call.
     #[derive(Default)]
     struct ScriptedModel {
         chunks: Mutex<Vec<ChatChunk>>,
@@ -427,7 +453,7 @@ mod tests {
         }
     }
 
-    /// Host tool stand-in (Go: chatv2 test `markerTool`).
+    /// Host tool stand-in.
     struct MarkerTool;
 
     #[async_trait]
@@ -444,7 +470,7 @@ mod tests {
         }
     }
 
-    /// Deterministic token-bucket embedder (Go: chatv2 test `hashEmbedder`).
+    /// Deterministic token-bucket embedder.
     struct HashEmbedder;
 
     #[async_trait]
@@ -534,9 +560,9 @@ mod tests {
         let names: Vec<&str> = prepared.tools.iter().map(|def| def.name.as_str()).collect();
         assert_eq!(names, ["marker"]);
 
-        // Go quirk preserved: a system prompt makes the history non-empty, so
-        // user_input is NOT seeded (normalizeMessages checks len(out) == 0
-        // after prepending the system message).
+        // A system prompt with an otherwise-empty history still seeds
+        // user_input as the first user message — the model must see the
+        // user's turn, not just the system message.
         let prepared = h
             .prepare(PrepareRequest {
                 user_id: "user_123".to_string(),
@@ -546,8 +572,18 @@ mod tests {
             })
             .await
             .expect("prepare");
-        assert_eq!(prepared.messages.len(), 1);
-        assert_eq!(prepared.messages[0].role, "system");
+        assert_eq!(
+            prepared
+                .messages
+                .iter()
+                .map(|m| m.role.as_str())
+                .collect::<Vec<_>>(),
+            ["system", "user"]
+        );
+        assert_eq!(
+            prepared.messages[1].content[0].content,
+            "How should backend import ditto-harness?"
+        );
 
         // System prompt + existing history -> system prepended.
         let prepared = h
@@ -588,7 +624,7 @@ mod tests {
         assert!(err.to_string().contains("user id is required"), "{err}");
     }
 
-    /// Port of Go `ExampleHarness_Run` (memory-less run).
+    /// A memory-less run returns the final text and collected costs.
     #[tokio::test]
     async fn run_without_memory_returns_text_and_costs() {
         let model = Arc::new(ScriptedModel::new(vec![final_chunk()]));
@@ -621,7 +657,7 @@ mod tests {
         assert_eq!(*seen, ["marker"]);
     }
 
-    /// Port of Go `TestHarnessPrepareRunAndSave`.
+    /// End-to-end prepare, run, and save with memory context and tools.
     #[tokio::test]
     async fn harness_prepare_run_and_save() {
         let db = Db::open_memory().await.expect("open db");
@@ -759,7 +795,8 @@ mod tests {
         );
         assert_eq!(out[1].content, ctx.content);
 
-        // [user] -> [user, ctx] (Go's i > 0 quirk: appended, not prepended).
+        // [user] -> [user, ctx]: see the function rustdoc — a non-system
+        // message at index 0 never gets the context prepended.
         let out = insert_after_system(vec![user.clone()], ctx.clone());
         assert_eq!(out.len(), 2);
         assert_eq!(out[1].content, ctx.content);

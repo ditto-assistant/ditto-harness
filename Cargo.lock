@@ -831,11 +831,10 @@ dependencies = [
  "chrono",
  "clap",
  "ditto-harness",
- "futures",
  "serde",
  "serde_json",
  "tokio",
- "tracing",
+ "tracing-subscriber",
  "turso",
 ]
 
@@ -851,7 +850,6 @@ dependencies = [
  "napi-derive",
  "serde",
  "serde_json",
- "tokio",
 ]
 
 [[package]]

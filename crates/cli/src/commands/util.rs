@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: MIT
 //! Shared helpers for the subcommand handlers: opening the store, building
 //! chat models and embedders from the global flags, and printing summaries.
 
@@ -39,6 +39,7 @@ pub(crate) async fn open_store(common: &Common) -> anyhow::Result<Arc<Store>> {
         db: Arc::new(db),
         embedder: Arc::new(build_embedder(common)),
         predictor: None,
+        reranker: None,
     })))
 }
 

@@ -4,10 +4,10 @@ Use this skill when changing the open-source Ditto agent memory harness.
 
 ## Rules
 
-- Keep this repo importable by the closed-source backend; avoid dependencies on `github.com/ditto-assistant/backend`.
+- Keep this repo importable by the closed-source backend; no dependencies on the closed-source Ditto backend.
 - Keep billing host-owned. Expose `CostedUsage` values; do not write receipt tables here.
-- Add app-specific tools through the `agent::Tool` / `ToolExecutor` traits; do not add closed-source Ditto tools directly.
-- Keep learned retrieval model artifacts host-owned. Use `retrieval::load_mlp_predictor` when an importing app supplies the model file.
+- Add app-specific tools through the `types::Tool` trait; do not add closed-source Ditto tools directly.
+- Keep learned retrieval model artifacts host-owned. Use `retrieval::MlpPredictor::load` when an importing app supplies the model file.
 - Keep schema changes minimal and memory-focused: users, memory pairs, subjects, links, retrieval events.
 - Run `cargo build` and `cargo test` before committing.
 - Run `cargo fmt --check` and `cargo clippy --workspace --all-targets -- -D warnings` before opening a PR.

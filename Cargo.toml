@@ -5,7 +5,7 @@ members = ["crates/harness", "crates/cli", "crates/node"]
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-license = "AGPL-3.0-or-later"
+license = "MIT"
 repository = "https://github.com/ditto-assistant/ditto-harness"
 
 [workspace.dependencies]
@@ -28,6 +28,7 @@ anyhow = "1"
 async-trait = "0.1"
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 reqwest = { version = "0.12", features = ["json"] }
 futures = "0.3"
 # Node bindings

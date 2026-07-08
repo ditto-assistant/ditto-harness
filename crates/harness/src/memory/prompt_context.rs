@@ -1,7 +1,33 @@
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: MIT
 //! Prompt memory context: long/short-term retrieval bundling and the JSON
-//! payload injected into the system prompt. Port of Go
-//! `pkg/memory/prompt_context.go` + `pkg/memory/prompt_memories.go`.
+//! payload injected into the system prompt.
+//!
+//! What the model actually sees is a system message built by
+//! `chat::memory_context_message`: the prefix
+//! `"Relevant memory context for this turn:\n"` followed by one JSON object.
+//! `longTerm` embeds [`build_prompt_long_term_json`]'s payload raw — the
+//! first [`PROMPT_DETAILED_SEED_ROOT_COUNT`] entries are detailed (`summary`,
+//! or `user`/`ditto` text when there is none, plus `parent`-stub children),
+//! the rest are title-only. `shortTerm` entries are always compact. Shape
+//! (whitespace added):
+//!
+//! ```json
+//! {
+//!   "longTerm": {"memories": [
+//!     {"pairID": "p1", "timestamp": "2026-01-02T12:00:00Z",
+//!      "summary": "User prefers Rust for backend work."},
+//!     {"pairID": "c1", "parent": "p1"},
+//!     {"pairID": "p2", "timestamp": "2026-01-01T09:30:00Z",
+//!      "user": "original prompt text", "ditto": "original response text"},
+//!     {"pairID": "p3", "timestamp": "2025-12-30T08:00:00Z",
+//!      "title": "Home lab setup"}
+//!   ]},
+//!   "shortTerm": [
+//!     {"pairID": "p4", "summary": "Chose Turso for local storage.",
+//!      "timestamp": "2026-01-02T13:00:00Z", "title": "Chose Turso for local storage."}
+//!   ]
+//! }
+//! ```
 
 use std::collections::BTreeMap;
 
@@ -12,12 +38,11 @@ use super::{ListRecentMemoriesRequest, Store};
 use crate::retrieval::Variant;
 use crate::types::{Memory, Result, RetrievalMetadata, SeedMemoryNode};
 
-/// How many leading long-term memories get detailed JSON entries
-/// (Go: `promptDetailedSeedRootCount`).
+/// How many leading long-term memories get detailed JSON entries.
 pub const PROMPT_DETAILED_SEED_ROOT_COUNT: usize = 2;
 
-/// Summary row describing one prompt memory (Go: `PromptMemorySummary`).
-/// JSON tags match Go exactly (note the capital-ID forms).
+/// Summary row describing one prompt memory. JSON field names follow the
+/// established wire format (note the capital-ID forms).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PromptMemorySummary {
     #[serde(rename = "pairID", default)]
@@ -62,7 +87,7 @@ pub struct PromptMemorySummary {
     pub composite_score: f64,
 }
 
-/// Request for [`Store::get_prompt_memories`] (Go: `PromptMemoryRequest`).
+/// Request for [`Store::get_prompt_memories`].
 /// Defaults: empty `kg_id` -> derived, empty `session_id` -> "main",
 /// `long_term_limit` 0 -> 8. `short_term_limit` 0 -> no short-term lookup.
 #[derive(Debug, Clone, Default)]
@@ -84,13 +109,13 @@ pub struct PromptMemoryRequest {
     pub use_composite: bool,
 }
 
-/// Diagnostics counter (Go: `PromptMemoryValue`).
+/// Diagnostics counter.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct PromptMemoryValue {
     pub count: usize,
 }
 
-/// Bundle of prompt memories (Go: `PromptMemoryResponse`). JSON matches Go.
+/// Bundle of prompt memories.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PromptMemoryResponse {
@@ -120,7 +145,7 @@ impl Store {
     /// Retrieves long-term (vector or composite) and short-term (recent)
     /// memories, excluding overlaps, and assembles the prompt bundle:
     /// seed nodes, ids, long-term JSON, summaries, and `longTerm`/`shortTerm`
-    /// diagnostics counts (Go: `Store.GetPromptMemories`).
+    /// diagnostics counts.
     pub async fn get_prompt_memories(
         &self,
         mut req: PromptMemoryRequest,
@@ -181,8 +206,7 @@ impl Store {
     }
 
     /// Long-term retrieval for the prompt: composite when requested, plain
-    /// vector search otherwise; empty queries skip retrieval entirely
-    /// (Go: `Store.getPromptLongTerm`).
+    /// vector search otherwise; empty queries skip retrieval entirely.
     async fn get_prompt_long_term(
         &self,
         req: &PromptMemoryRequest,
@@ -221,7 +245,7 @@ impl Store {
     }
 }
 
-/// Empty session resolves to "main" (Go: `ResolvePromptSessionID`).
+/// Empty session resolves to "main".
 pub fn resolve_prompt_session_id(session_id: &str) -> String {
     if session_id.is_empty() {
         return crate::types::MAIN_SESSION_ID.to_string();
@@ -229,7 +253,7 @@ pub fn resolve_prompt_session_id(session_id: &str) -> String {
     session_id.to_string()
 }
 
-/// Summarizes up to `limit` memories (Go: `SummarizePromptMemories`).
+/// Summarizes up to `limit` memories.
 /// Carries pair id, resolved session, source, timestamp, title, child count,
 /// cosine similarity, and composite score.
 pub fn summarize_prompt_memories(memories: &[Memory], limit: usize) -> Vec<PromptMemorySummary> {
@@ -247,14 +271,15 @@ pub fn summarize_prompt_memories(memories: &[Memory], limit: usize) -> Vec<Promp
             title: prompt_memory_title(mem),
             children: mem.seed_memories.len(),
             cosine_sim: mem.similarity,
+            recency_score: mem.recency_score,
+            frequency_score: mem.frequency_score,
             composite_score: mem.composite_score,
-            ..PromptMemorySummary::default()
         })
         .collect()
 }
 
-/// Builds the `{"memories":[...]}` JSON string injected into the prompt
-/// (Go: `BuildPromptLongTermJSON`). The first
+/// Builds the `{"memories":[...]}` JSON string injected into the prompt.
+/// The first
 /// [`PROMPT_DETAILED_SEED_ROOT_COUNT`] memories are detailed (summary or
 /// user/ditto text, plus child stubs with `parent` set); the rest are
 /// title-only entries. Returns `{"memories":[]}` for empty input.
@@ -273,7 +298,7 @@ pub fn build_prompt_long_term_json(memories: &[Memory]) -> String {
 }
 
 /// Best display title for a memory: title, else summary, else prompt, else
-/// first non-empty input content (Go: `PromptMemoryTitle`).
+/// first non-empty input content.
 pub fn prompt_memory_title(mem: &Memory) -> String {
     if !mem.title.is_empty() {
         return mem.title.clone();
@@ -293,7 +318,7 @@ pub fn prompt_memory_title(mem: &Memory) -> String {
 }
 
 /// Flattens long-term then short-term memories into seed nodes, each carrying
-/// its own child seed memories (Go: `SeedMemoryNodes`).
+/// its own child seed memories.
 pub fn seed_memory_nodes(long_term: &[Memory], short_term: &[Memory]) -> Vec<SeedMemoryNode> {
     long_term
         .iter()
@@ -305,8 +330,7 @@ pub fn seed_memory_nodes(long_term: &[Memory], short_term: &[Memory]) -> Vec<See
         .collect()
 }
 
-/// One entry (plus child stubs when detailed) for the long-term prompt JSON
-/// (Go: `addPromptMemoryJSON`).
+/// One entry (plus child stubs when detailed) for the long-term prompt JSON.
 fn add_prompt_memory_json(
     items: &mut Vec<serde_json::Value>,
     mem: &Memory,
@@ -353,8 +377,7 @@ fn add_prompt_memory_json(
     items.push(serde_json::Value::Object(item));
 }
 
-/// Non-empty `fallback`, else the concatenated non-empty content parts
-/// (Go: `contentText`).
+/// Non-empty `fallback`, else the concatenated non-empty content parts.
 fn content_text(parts: &[crate::types::Content], fallback: &str) -> String {
     if !fallback.is_empty() {
         return fallback.to_string();
@@ -368,7 +391,7 @@ fn content_text(parts: &[crate::types::Content], fallback: &str) -> String {
     out
 }
 
-/// Pair ids of memories with non-empty ids (Go: `memoryIDs`).
+/// Pair ids of memories with non-empty ids.
 fn memory_ids(memories: &[Memory]) -> Vec<String> {
     memories
         .iter()
@@ -385,7 +408,8 @@ mod tests {
     use super::super::SaveMemoryRequest;
     use super::*;
 
-    /// Port of Go `TestBuildPromptLongTermJSONCompressesAfterFirstTwo`.
+    /// The first two long-term entries are detailed; later ones compress to
+    /// title-only.
     #[test]
     fn build_prompt_long_term_json_compresses_after_first_two() {
         let ts = |day: u32| {
@@ -444,7 +468,7 @@ mod tests {
         assert_eq!(build_prompt_long_term_json(&[]), r#"{"memories":[]}"#);
     }
 
-    /// Port of Go `TestSummarizePromptMemories`.
+    /// Summaries resolve the session id and carry similarity/composite scores.
     #[test]
     fn summarize_prompt_memories_resolves_session_and_scores() {
         let memories = vec![Memory {
@@ -469,9 +493,9 @@ mod tests {
         assert!(summarize_prompt_memories(&memories, 0).is_empty());
     }
 
-    /// Port of Go
-    /// `TestGetPromptMemoriesReturnsCompositeLongTermAndRecentShortTerm`
-    /// (non-composite long-term path; composite is owned by `retrieval`).
+    /// The prompt bundle pairs long-term retrieval with recent short-term
+    /// memories (non-composite long-term path; composite is owned by
+    /// `retrieval`).
     #[tokio::test]
     async fn get_prompt_memories_returns_long_term_and_recent_short_term() {
         let store = new_test_store().await;

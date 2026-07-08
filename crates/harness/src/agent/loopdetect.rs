@@ -1,20 +1,17 @@
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: MIT
 //! Detection of repeated identical tool calls.
-//! Port of Go `pkg/agent/loopdetect`.
 
-/// Number of identical consecutive calls that triggers detection
-/// (Go: `MaxConsecutiveSameToolCalls`).
+/// Number of identical consecutive calls that triggers detection.
 pub const MAX_CONSECUTIVE_SAME_TOOL_CALLS: usize = 3;
 
-/// A tool call identity: name plus raw argument string
-/// (Go: `loopdetect.ToolCall`).
+/// A tool call identity: name plus raw argument string.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ToolCallKey {
     pub name: String,
     pub args: String,
 }
 
-/// A detected loop (Go: `loopdetect.Detection`).
+/// A detected loop.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Detection {
     pub turn: usize,
@@ -22,7 +19,7 @@ pub struct Detection {
     pub consecutive_calls: usize,
 }
 
-/// Stateful detector fed one turn at a time (Go: `loopdetect.Detector`).
+/// Stateful detector fed one turn at a time.
 #[derive(Debug, Clone, Default)]
 pub struct Detector {
     consecutive_count: usize,
@@ -34,7 +31,7 @@ impl Detector {
     /// detector. A single call increments the streak when identical
     /// (name + args) to the previous call, else restarts it at 1. Returns
     /// `Some(Detection)` once the streak reaches
-    /// [`MAX_CONSECUTIVE_SAME_TOOL_CALLS`] (Go: `Detector.RecordTurn`).
+    /// [`MAX_CONSECUTIVE_SAME_TOOL_CALLS`].
     pub fn record_turn(&mut self, turn: usize, calls: &[ToolCallKey]) -> Option<Detection> {
         if calls.len() != 1 {
             self.reset();

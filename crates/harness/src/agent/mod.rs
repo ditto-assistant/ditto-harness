@@ -1,7 +1,6 @@
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: MIT
 //! Importable multi-turn agent loop with injectable model/tools, stream-style
 //! event hooks, tool loop detection, and cost collection.
-//! Port of Go `pkg/agent`.
 
 pub mod loopdetect;
 
@@ -17,15 +16,13 @@ use crate::types::{
     ToolCall, ToolCallResponse, ToolDefinition,
 };
 
-/// Max model turns per run when unset (Go hardcodes 8).
+/// Max model turns per run when unset.
 pub const DEFAULT_MAX_TURNS: usize = 8;
 
-/// Synthesis prompt injected after a tool loop is detected
-/// (Go: `LoopBreakSynthesisPrompt`).
+/// Synthesis prompt injected after a tool loop is detected.
 pub const LOOP_BREAK_SYNTHESIS_PROMPT: &str = "You repeated the same tool call several times without producing a final answer. Stop calling tools and answer the user's request now using the conversation context and the tool results you already have. If the available results are incomplete, say that briefly and answer with what you have.";
 
-/// Tool output substituted for a loop-detected call (Go:
-/// `loopBreakToolResult`), as a JSON value.
+/// Tool output substituted for a loop-detected call, as a JSON value.
 pub fn loop_break_tool_result() -> Value {
     serde_json::json!({
         "status": "loop_detected",
@@ -33,14 +30,14 @@ pub fn loop_break_tool_result() -> Value {
     })
 }
 
-/// The agent loop (Go: `agent.Loop`).
+/// The agent loop.
 pub struct Loop {
     model: Arc<dyn Model>,
     memory: Option<Arc<Store>>,
     tools: Vec<Arc<dyn Tool>>,
 }
 
-/// Constructor options for [`Loop::new`] (Go: `agent.Options`).
+/// Constructor options for [`Loop::new`].
 pub struct Options {
     pub model: Arc<dyn Model>,
     /// Required only when `RunRequest::save_memory` is used.
@@ -48,8 +45,8 @@ pub struct Options {
     pub tools: Vec<Arc<dyn Tool>>,
 }
 
-/// Request for [`Loop::run`] / [`Loop::run_streaming`]
-/// (Go: `agent.RunRequest`). `max_turns` 0 -> [`DEFAULT_MAX_TURNS`].
+/// Request for [`Loop::run`] / [`Loop::run_streaming`].
+/// `max_turns` 0 -> [`DEFAULT_MAX_TURNS`].
 #[derive(Debug, Clone, Default)]
 pub struct RunRequest {
     pub user_id: String,
@@ -62,7 +59,7 @@ pub struct RunRequest {
     pub save_memory: bool,
 }
 
-/// Result of a run (Go: `agent.RunResult`). JSON matches Go tags.
+/// Result of a run. JSON field names match the original wire format.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RunResult {
     pub messages: Vec<ChatMessage>,
@@ -74,24 +71,29 @@ pub struct RunResult {
     pub metadata: Option<serde_json::Map<String, Value>>,
 }
 
-/// Stream-style observer for loop events (Go: `agent.EventHandler`).
+/// Stream-style observer for loop events.
 /// All methods default to no-ops, so hosts implement only what they need.
 pub trait EventHandler: Send + Sync {
+    /// Fires when a turn yields non-empty final chat text, ending the run.
     fn send_chat_content(&self, _text: &str) {}
+    /// Fires when the model emits a tool call, carrying its name/arguments; before execution.
     fn send_tool_call_progress(&self, _tool_call_id: &str, _data: &Value) {}
+    /// Fires when the model finished streaming the call block — emitted BEFORE the tool executes.
     fn send_tool_call_completed(&self, _tool_call_id: &str, _tool_name: &str) {}
+    /// Fires after the tool executed (or a loop break substituted a canned result).
     fn send_tool_result(&self, _result: &ToolCallResponse) {}
+    /// Fires when a model call fails, just before the run returns that error.
     fn send_error(&self, _err: &Error) {}
 }
 
-/// Handler that ignores every event (Go: `noopHandler`).
+/// Handler that ignores every event.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NoopHandler;
 
 impl EventHandler for NoopHandler {}
 
 impl Loop {
-    /// Creates a loop (Go: `agent.NewLoop`).
+    /// Creates a loop.
     pub fn new(opts: Options) -> Loop {
         Loop {
             model: opts.model,
@@ -100,23 +102,20 @@ impl Loop {
         }
     }
 
-    /// Runs the loop without event callbacks (Go: `Loop.Run`).
+    /// Runs the loop without event callbacks.
     pub async fn run(&self, req: RunRequest) -> Result<RunResult> {
         self.run_streaming(req, &NoopHandler).await
     }
 
-    /// Runs up to `max_turns` model turns (Go: `Loop.RunStreaming`):
-    /// each turn calls `Model::next`; a text chunk finishes the run (emitted
-    /// via `send_chat_content` and appended as an assistant message); a tool
-    /// call is recorded, checked by [`loopdetect::Detector`] (3 identical
-    /// consecutive calls -> substitute [`loop_break_tool_result`], inject
-    /// [`LOOP_BREAK_SYNTHESIS_PROMPT`] as a user message, and drop all tool
-    /// definitions for subsequent turns), executed, and its
-    /// [`ToolCallResponse`] appended as a role:"tool" message whose content
-    /// part carries the response (with `output` set to the full serialized
-    /// response JSON, as Go's `toolMessage` does). Costs from every chunk are
-    /// collected. With `save_memory`, the final text is persisted via the
-    /// memory store (prompt = last user text).
+    /// Runs up to `max_turns` model turns: a text chunk finishes the run; a
+    /// tool call is executed and appended as a role:"tool" message, with a
+    /// detected tool loop breaking to a synthesis prompt and no further
+    /// tools. With `save_memory`, the final text is persisted via the memory
+    /// store.
+    ///
+    /// "Streaming" here means per-event [`EventHandler`] hooks (chat content,
+    /// tool progress/results, errors), not token streaming: each turn is one
+    /// whole-chunk `Model::next` call.
     pub async fn run_streaming(
         &self,
         req: RunRequest,
@@ -127,7 +126,6 @@ impl Loop {
         } else {
             req.max_turns
         };
-        let mut messages = req.messages.clone();
         let mut defs: Vec<ToolDefinition> = Vec::with_capacity(self.tools.len());
         let mut tools_by_name: HashMap<String, Arc<dyn Tool>> =
             HashMap::with_capacity(self.tools.len());
@@ -136,12 +134,18 @@ impl Loop {
             tools_by_name.insert(def.name.clone(), Arc::clone(tool));
             defs.push(def);
         }
+        let mut state = TurnState {
+            messages: req.messages.clone(),
+            detector: loopdetect::Detector::default(),
+            defs,
+            tools_by_name,
+        };
 
         let mut costs = CostCollector::default();
         let mut final_text = String::new();
-        let mut detector = loopdetect::Detector::default();
+        let mut finished = false;
         for turn in 0..max_turns {
-            let chunk = match self.model.next(&messages, &defs).await {
+            let chunk = match self.model.next(&state.messages, &state.defs).await {
                 Ok(chunk) => chunk,
                 Err(err) => {
                     handler.send_error(&err);
@@ -150,11 +154,12 @@ impl Loop {
             };
             costs.add(chunk.cost.as_ref());
             let Some(tc) = chunk.tool_call else {
+                finished = true;
                 final_text = chunk.text.clone();
                 if !chunk.text.is_empty() {
                     handler.send_chat_content(&chunk.text);
                 }
-                messages.push(ChatMessage {
+                state.messages.push(ChatMessage {
                     role: "assistant".to_string(),
                     content: vec![Content {
                         content_type: Some(ContentType::Text),
@@ -166,92 +171,62 @@ impl Loop {
                 break;
             };
 
-            let args_string = tool_call_args_string(&tc);
-            handler.send_tool_call_progress(
-                &tc.id,
-                &serde_json::json!({"name": tc.name, "arguments": args_string}),
-            );
-            handler.send_tool_call_completed(&tc.id, &tc.name);
-            messages.push(ChatMessage {
-                role: "assistant".to_string(),
-                tool_calls: vec![tc.clone()],
-                ..ChatMessage::default()
-            });
-
-            let key = loopdetect::ToolCallKey {
-                name: tc.name.clone(),
-                args: args_string,
-            };
-            if detector.record_turn(turn, &[key]).is_some() {
-                let resp = ToolCallResponse {
-                    id: tc.id.clone(),
-                    name: tc.name.clone(),
-                    output: loop_break_tool_result(),
-                    error: String::new(),
-                };
-                handler.send_tool_result(&resp);
-                messages.push(tool_message(resp));
-                messages.push(ChatMessage {
-                    role: "user".to_string(),
-                    content: vec![Content {
-                        content_type: Some(ContentType::Text),
-                        content: LOOP_BREAK_SYNTHESIS_PROMPT.to_string(),
-                        ..Content::default()
-                    }],
-                    ..ChatMessage::default()
-                });
-                defs = Vec::new();
-                tools_by_name = HashMap::new();
-                continue;
-            }
-
-            let mut results = execute_calls(&tools_by_name, std::slice::from_ref(&tc)).await;
-            let resp = if results.is_empty() {
-                ToolCallResponse {
-                    id: tc.id.clone(),
-                    name: tc.name.clone(),
-                    error: "tool produced no result".to_string(),
-                    ..ToolCallResponse::default()
-                }
-            } else {
-                results.remove(0)
-            };
-            handler.send_tool_result(&resp);
-            messages.push(tool_message(resp));
+            handle_tool_call(handler, &mut state, turn, tc).await;
         }
 
         if req.save_memory && !final_text.is_empty() {
-            if let Some(store) = &self.memory {
-                store
-                    .save_memory(SaveMemoryRequest {
-                        user_id: req.user_id.clone(),
-                        kg_id: req.kg_id.clone(),
-                        session_id: req.session_id.clone(),
-                        prompt: last_user_text(&req.messages),
-                        response: final_text.clone(),
-                        output: vec![Content {
-                            content_type: Some(ContentType::Text),
-                            content: final_text.clone(),
-                            ..Content::default()
-                        }],
-                        source: "agent_loop".to_string(),
-                        ..SaveMemoryRequest::default()
-                    })
-                    .await
-                    .map_err(|err| Error::Other(format!("save agent memory: {err}")))?;
-            }
+            self.save_final_memory(&req, &final_text).await?;
         }
 
+        // Exhausting max_turns mid-tool-loop is distinguishable from an
+        // empty final answer via metadata (additive; absent otherwise).
+        let metadata = if finished {
+            None
+        } else {
+            let mut map = serde_json::Map::new();
+            map.insert(
+                "stop_reason".to_string(),
+                Value::String("max_turns".to_string()),
+            );
+            Some(map)
+        };
+
         Ok(RunResult {
-            messages,
+            messages: state.messages,
             text: final_text,
             costs: costs.into_items(),
-            metadata: None,
+            metadata,
         })
     }
 
+    /// Persists the run's final text via the memory store (source
+    /// "agent_loop", prompt = last user text of the request messages).
+    async fn save_final_memory(&self, req: &RunRequest, final_text: &str) -> Result<()> {
+        let Some(store) = &self.memory else {
+            return Ok(());
+        };
+        store
+            .save_memory(SaveMemoryRequest {
+                user_id: req.user_id.clone(),
+                kg_id: req.kg_id.clone(),
+                session_id: req.session_id.clone(),
+                prompt: last_user_text(&req.messages),
+                response: final_text.to_string(),
+                output: vec![Content {
+                    content_type: Some(ContentType::Text),
+                    content: final_text.to_string(),
+                    ..Content::default()
+                }],
+                source: "agent_loop".to_string(),
+                ..SaveMemoryRequest::default()
+            })
+            .await
+            .map_err(|err| Error::Other(format!("save agent memory: {err}")))?;
+        Ok(())
+    }
+
     /// Executes tool calls concurrently, preserving order; unknown tools
-    /// yield an error response (Go: `Loop.ExecuteToolCalls`). Each tool's
+    /// yield an error response. Each tool's
     /// `execute` output is wrapped into a [`ToolCallResponse`] with the
     /// call's id/name; `Err` populates `error`.
     pub async fn execute_tool_calls(&self, calls: &[ToolCall]) -> Vec<ToolCallResponse> {
@@ -263,14 +238,89 @@ impl Loop {
         execute_calls(&tools_by_name, calls).await
     }
 
-    /// Definitions of the configured tools (Go: `Loop.Tools`).
+    /// Definitions of the configured tools.
     pub fn tools(&self) -> Vec<ToolDefinition> {
         self.tools.iter().map(|tool| tool.definition()).collect()
     }
 }
 
-/// Renders a tool call's raw JSON args as the string Go sees via
-/// `string(tc.Args)`; `Null` (absent) becomes the empty string.
+/// Mutable per-run state owned by [`Loop::run_streaming`] and threaded
+/// through each tool-call turn.
+struct TurnState {
+    messages: Vec<ChatMessage>,
+    detector: loopdetect::Detector,
+    defs: Vec<ToolDefinition>,
+    tools_by_name: HashMap<String, Arc<dyn Tool>>,
+}
+
+/// Handles one tool-call turn: emits the tool events, appends the assistant
+/// tool-call message, and either executes the call (appending its
+/// role:"tool" response) or — when [`loopdetect::Detector`] flags 3 identical
+/// consecutive calls — substitutes [`loop_break_tool_result`], injects
+/// [`LOOP_BREAK_SYNTHESIS_PROMPT`] as a user message, and clears the state's
+/// `defs`/`tools_by_name` so subsequent turns run without tools.
+async fn handle_tool_call(
+    handler: &dyn EventHandler,
+    state: &mut TurnState,
+    turn: usize,
+    tc: ToolCall,
+) {
+    let args_string = tool_call_args_string(&tc);
+    handler.send_tool_call_progress(
+        &tc.id,
+        &serde_json::json!({"name": tc.name, "arguments": args_string}),
+    );
+    handler.send_tool_call_completed(&tc.id, &tc.name);
+    state.messages.push(ChatMessage {
+        role: "assistant".to_string(),
+        tool_calls: vec![tc.clone()],
+        ..ChatMessage::default()
+    });
+
+    let key = loopdetect::ToolCallKey {
+        name: tc.name.clone(),
+        args: args_string,
+    };
+    if state.detector.record_turn(turn, &[key]).is_some() {
+        let resp = ToolCallResponse {
+            id: tc.id.clone(),
+            name: tc.name.clone(),
+            output: loop_break_tool_result(),
+            error: String::new(),
+        };
+        handler.send_tool_result(&resp);
+        state.messages.push(tool_message(resp));
+        state.messages.push(ChatMessage {
+            role: "user".to_string(),
+            content: vec![Content {
+                content_type: Some(ContentType::Text),
+                content: LOOP_BREAK_SYNTHESIS_PROMPT.to_string(),
+                ..Content::default()
+            }],
+            ..ChatMessage::default()
+        });
+        state.defs.clear();
+        state.tools_by_name.clear();
+        return;
+    }
+
+    let mut results = execute_calls(&state.tools_by_name, std::slice::from_ref(&tc)).await;
+    let resp = if results.is_empty() {
+        ToolCallResponse {
+            id: tc.id.clone(),
+            name: tc.name.clone(),
+            error: "tool produced no result".to_string(),
+            ..ToolCallResponse::default()
+        }
+    } else {
+        results.remove(0)
+    };
+    handler.send_tool_result(&resp);
+    state.messages.push(tool_message(resp));
+}
+
+/// Renders a tool call's raw JSON args as a compact JSON string;
+/// `Null` (absent) becomes the empty string.
 fn tool_call_args_string(tc: &ToolCall) -> String {
     if tc.args.is_null() {
         String::new()
@@ -280,7 +330,7 @@ fn tool_call_args_string(tc: &ToolCall) -> String {
 }
 
 /// Executes the given calls concurrently against the tool map, preserving
-/// input order (Go: `executeToolCalls`).
+/// input order.
 async fn execute_calls(
     tools_by_name: &HashMap<String, Arc<dyn Tool>>,
     calls: &[ToolCall],
@@ -317,7 +367,7 @@ async fn execute_calls(
 
 /// Wraps a tool response into a role:"tool" message whose content part
 /// carries the response with `output` replaced by the full serialized
-/// response JSON (Go: `toolMessage`).
+/// response JSON.
 fn tool_message(resp: ToolCallResponse) -> ChatMessage {
     let raw = serde_json::to_value(&resp).unwrap_or(Value::Null);
     let mut result = resp;
@@ -335,7 +385,7 @@ fn tool_message(resp: ToolCallResponse) -> ChatMessage {
     }
 }
 
-/// Extracts the last user message's concatenated text (Go: `lastUserText`).
+/// Extracts the last user message's concatenated text.
 pub fn last_user_text(messages: &[ChatMessage]) -> String {
     for msg in messages.iter().rev() {
         if msg.role != "user" {
@@ -654,7 +704,7 @@ mod tests {
         let part = &msg.content[0];
         assert_eq!(part.content_type, Some(ContentType::ToolResult));
         let resp = part.tool_call_response.as_ref().expect("response");
-        // Output carries the full serialized response, like Go's toolMessage.
+        // Output carries the full serialized response.
         assert_eq!(
             resp.output,
             serde_json::json!({"id": "call_1", "name": "echo", "output": {"ok": true}})

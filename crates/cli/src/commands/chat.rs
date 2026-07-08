@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: MIT
 //! `chat` subcommand: one chat turn through `chat::Harness` with memory
 //! tools enabled, streaming text to stdout and tool events to stderr, then
 //! printing cost and which memory tools were called.

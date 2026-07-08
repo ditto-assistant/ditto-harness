@@ -1,7 +1,30 @@
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: MIT
 //! Composite retrieval, retrieval-event logging, auxiliary feature
 //! extraction, and the loadable learned-weight MLP predictor.
-//! Port of Go `pkg/retrieval`.
+//!
+//! # Composite signals
+//!
+//! The V2 composite score is `scale * Σ (weight_i * signal_i)` over the
+//! signals below, computed per candidate by [`composite_retrieve`] ("pool" = the
+//! `candidate_pool_size` vector-nearest candidates):
+//!
+//! | signal | formula | normalization |
+//! |---|---|---|
+//! | cosine | `1 - vector_distance_cos(pair embedding, query)` | absolute |
+//! | recency_linear | `(ts - oldest) / (newest - oldest)` over pool timestamps; 1.0 if the pool spans zero time | pool min-max |
+//! | recency_exp | `exp(-(now - ts) / τ)`, τ = 14 days ([`V2_RECENCY_TAU_SECS`]) | absolute |
+//! | subject_frequency | Σ global link counts of the pair's linked subjects (counted over the whole link table) | / pool max (floor 1) |
+//! | subject_sem_match | max cosine(query, linked subject embedding); 0 with no embedded subjects | absolute |
+//! | session_continuity | 1.0 iff pair `session_id` == `current_session_id` (exact equality; 0 when current is empty) | binary |
+//! | neighbor_density | distinct other pool pairs sharing >= 1 subject | / pool max (floor 1) |
+//! | scale | multiplies the whole weighted sum (0 coerced to 1) | — |
+//!
+//! V1 uses only cosine + recency_linear + subject_frequency and ignores
+//! `scale`; the rest are V2-only.
+//!
+//! **Warning:** recency_linear, subject_frequency, and neighbor_density are
+//! POOL-RELATIVE — changing the candidate pool (size, exclusions, corpus
+//! growth) changes every candidate's score, not just the new entries.
 
 pub mod features;
 pub mod mlp;
@@ -21,15 +44,15 @@ pub use features::{
 };
 pub use mlp::{weights_from_slice, MlpPredictor};
 
-/// Composite scoring variant (Go: `retrieval.Variant`).
+/// Composite scoring variant.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Variant {
-    /// Cosine + linear recency + subject frequency (Go: `VariantLegacy`, "v1").
+    /// Cosine + linear recency + subject frequency ("v1").
     #[default]
     #[serde(rename = "v1")]
     Legacy,
     /// Adds recency-exp, subject semantic match, session continuity, and
-    /// neighbor density (Go: `VariantV2`, "v2").
+    /// neighbor density ("v2").
     #[serde(rename = "v2")]
     V2,
 }
@@ -43,7 +66,7 @@ impl std::fmt::Display for Variant {
     }
 }
 
-/// Indexes into the V2 weight vector (Go: `V2Weight*` consts).
+/// Indexes into the V2 weight vector.
 pub const V2_WEIGHT_COSINE: usize = 0;
 pub const V2_WEIGHT_RECENCY_LINEAR: usize = 1;
 pub const V2_WEIGHT_RECENCY_EXP: usize = 2;
@@ -53,11 +76,15 @@ pub const V2_WEIGHT_SESSION_CONTINUITY: usize = 5;
 pub const V2_WEIGHT_NEIGHBOR_DENSITY: usize = 6;
 pub const V2_NUM_WEIGHTS: usize = 7;
 
-/// Time constant for the V2 recency-exp feature, in seconds
-/// (Go inlines `14*24*3600.0`).
+/// Time constant for the V2 recency-exp feature, in seconds (14 days).
 pub const V2_RECENCY_TAU_SECS: f64 = 14.0 * 24.0 * 3600.0;
 
-/// Composite retrieval weights (Go: `Weights`). JSON matches Go tags.
+/// Max ids per `IN (?,...)` batch; keeps statements comfortably under SQLite
+/// bind-parameter limits (mirrors `Db::fetch_memories`'s chunk discipline).
+const IN_CLAUSE_CHUNK_SIZE: usize = 500;
+
+/// Composite retrieval weights. The camelCase JSON field names are the
+/// established wire shape; keep them stable.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Weights {
@@ -77,7 +104,7 @@ pub struct Weights {
 }
 
 impl Weights {
-    /// The all-zero value (Go's `Weights{}`), used for "unset" checks.
+    /// The all-zero value, used for "unset" checks.
     pub const ZERO: Weights = Weights {
         cosine: 0.0,
         recency_linear: 0.0,
@@ -95,7 +122,7 @@ impl Weights {
     }
 }
 
-/// `Default` mirrors Go `DefaultWeights()`: cosine 0.65, recencyLinear 0.20,
+/// `Default` is the standard weight set: cosine 0.65, recencyLinear 0.20,
 /// subjectFrequency 0.15, scale 1.
 impl Default for Weights {
     fn default() -> Weights {
@@ -109,12 +136,12 @@ impl Default for Weights {
     }
 }
 
-/// Go: `DefaultWeights()`.
+/// The standard default weights; same value as `Weights::default()`.
 pub fn default_weights() -> Weights {
     Weights::default()
 }
 
-/// One scored candidate from composite retrieval (Go: `CompositeMemory`).
+/// One scored candidate from composite retrieval.
 /// `pair_id` is the public pair id (`firestore_pair_id`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -134,7 +161,7 @@ pub struct CompositeMemory {
     pub neighbor_density: f64,
 }
 
-/// Parameters for [`composite_retrieve`] (Go: `CompositeParams`).
+/// Parameters for [`composite_retrieve`].
 #[derive(Debug, Clone, Default)]
 pub struct CompositeParams {
     pub embedding: Vec<f32>,
@@ -150,6 +177,10 @@ pub struct CompositeParams {
     pub limit: usize,
     /// `0` -> `max(32, limit * 4)`.
     pub candidate_pool_size: usize,
+    /// Pair ids excluded from the candidate pool. The whole list binds into a
+    /// single `NOT IN (...)` statement (chunking a NOT IN would change its
+    /// meaning), so exclusion lists are expected to stay session-scale and
+    /// bounded by SQLite's bind-parameter limit (~32k).
     pub exclude_pair_ids: Vec<String>,
     /// `Weights::ZERO` -> defaults; `scale == 0` -> 1.
     pub weights: Weights,
@@ -160,7 +191,7 @@ pub struct CompositeParams {
     pub log_event: bool,
 }
 
-/// Auxiliary features fed to a [`WeightPredictor`] (Go: `Features`).
+/// Auxiliary features fed to a [`WeightPredictor`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Features {
@@ -168,9 +199,12 @@ pub struct Features {
     pub query: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub now: Option<DateTime<Utc>>,
-    /// Never serialized (Go: `json:"-"`).
+    /// Never serialized.
     #[serde(skip)]
     pub query_embedding: Vec<f32>,
+    // `short_term_memory_count`, `candidate_memory_count`, `embedding_norm`,
+    // and `host_application_signal` are reserved for training-log schema
+    // parity; no caller in this crate populates them yet.
     #[serde(default, skip_serializing_if = "crate::types::is_zero_i64")]
     pub short_term_memory_count: i64,
     #[serde(default, skip_serializing_if = "crate::types::is_zero_i64")]
@@ -183,19 +217,40 @@ pub struct Features {
     pub host_application_signal: String,
 }
 
-/// Predicts composite retrieval weights from query features
-/// (Go: `WeightPredictor`).
+/// Predicts composite retrieval weights from query features.
+///
+/// Contract:
+/// - Returned weights need not sum to 1 or be normalized in any way; they
+///   multiply the signal values as-is.
+/// - Returning [`Weights::ZERO`] means "unset": [`composite_retrieve`] falls
+///   back to [`default_weights`]. A `scale` of 0 is treated as 1.0 downstream.
+/// - `Features::query_embedding` is the 768-dimensional query vector
+///   (`db::EMBEDDING_DIMS`); the other populated fields are `query`, `now`,
+///   and `current_session_id`.
 #[async_trait]
 pub trait WeightPredictor: Send + Sync {
     async fn predict(&self, features: &Features) -> Result<Weights>;
 }
 
 /// Default size of the candidate pool handed to a [`Reranker`] before
-/// truncating to the caller's limit (Go production: `ceRerankPoolSize = 20`).
+/// truncating to the caller's limit (matches Ditto's production pool size of 20).
 pub const RERANK_POOL_SIZE: usize = 20;
 
+/// Default composite-retrieval result limit when the caller passes 0.
+pub const DEFAULT_COMPOSITE_LIMIT: usize = 8;
+
+/// Floor of the candidate pool pulled for composite scoring when the caller
+/// passes 0; see [`default_candidate_pool_size`].
+pub const MIN_CANDIDATE_POOL: usize = 32;
+
+/// Default candidate-pool sizing rule: at least [`MIN_CANDIDATE_POOL`],
+/// widening to `limit * 4` for larger limits.
+pub fn default_candidate_pool_size(limit: usize) -> usize {
+    MIN_CANDIDATE_POOL.max(limit * 4)
+}
+
 /// Second-stage reranker applied to the composite-ordered candidate pool
-/// (Go production: the cross-encoder rerank in `pkg/services/retrieval/crossencoder`).
+/// (the cross-encoder rerank stage in Ditto's production backend).
 ///
 /// Mirrors the production pipeline shape: composite retrieval widens the pool to
 /// [`RERANK_POOL_SIZE`], the reranker reorders it against `query`, and the result
@@ -217,7 +272,7 @@ pub trait Reranker: Send + Sync {
     ) -> Result<Vec<crate::types::Memory>>;
 }
 
-/// A predictor that always returns fixed weights (Go: `StaticPredictor`).
+/// A predictor that always returns fixed weights.
 /// Zero weights fall back to [`default_weights`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StaticPredictor {
@@ -234,7 +289,7 @@ impl WeightPredictor for StaticPredictor {
     }
 }
 
-/// Runs composite retrieval (Go: `CompositeRetrieve`).
+/// Runs composite retrieval.
 ///
 /// Implementation strategy for Turso: pull the candidate pool with a vector
 /// query (`ORDER BY vector_distance_cos(conversation_embedding, ?) LIMIT
@@ -249,10 +304,10 @@ pub async fn composite_retrieve(
     mut params: CompositeParams,
 ) -> Result<Vec<CompositeMemory>> {
     if params.limit == 0 {
-        params.limit = 8;
+        params.limit = DEFAULT_COMPOSITE_LIMIT;
     }
     if params.candidate_pool_size == 0 {
-        params.candidate_pool_size = 32.max(params.limit * 4);
+        params.candidate_pool_size = default_candidate_pool_size(params.limit);
     }
     let mut weights = if params.weights.is_zero() {
         default_weights()
@@ -306,15 +361,26 @@ struct Candidate {
     cosine: f64,
 }
 
-/// Ports the Go `compositeSQLV1`/`compositeSQLV2` CTE queries: the candidate
-/// pool comes from a Turso vector query; the freq / bounds / subject-match /
-/// neighbor-density aggregates and the weighted score are computed in Rust.
+/// Subject-link aggregates for a candidate pool.
+#[derive(Debug, Default)]
+struct SubjectLinks {
+    /// Candidate pair row id -> linked subject ids.
+    pair_subjects: HashMap<String, Vec<String>>,
+    /// Subject id -> candidate pair row ids linked to it.
+    subject_pairs: HashMap<String, Vec<String>>,
+    /// Per-subject global link counts — deliberately counted over the whole
+    /// table, not just the candidate pool.
+    subject_link_counts: HashMap<String, i64>,
+}
+
+/// Scores the candidate pool for both variants: the candidate pool comes from
+/// a Turso vector query; the freq / bounds / subject-match / neighbor-density
+/// aggregates and the weighted score are computed in Rust.
 async fn score_candidates(
     db: &Db,
     params: &CompositeParams,
     weights: Weights,
 ) -> Result<Vec<CompositeMemory>> {
-    let conn = db.connection();
     if params.embedding.len() != crate::db::EMBEDDING_DIMS {
         return Err(Error::InvalidArgument(format!(
             "query embedding dimension = {}, want {}",
@@ -325,7 +391,34 @@ async fn score_candidates(
     let blob = crate::db::encode_f32_blob(&params.embedding);
     let min_timestamp = params.min_timestamp.unwrap_or(DateTime::<Utc>::UNIX_EPOCH);
 
-    // Candidate pool (Go: `candidates` CTE).
+    let candidates = fetch_candidates(db, params, &blob, min_timestamp).await?;
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+    let links = fetch_subject_links(db, &candidates).await?;
+    let subject_sem = if params.variant == Variant::V2 {
+        v2_aggregates(db, &blob, &links).await?
+    } else {
+        HashMap::new()
+    };
+    Ok(score(
+        &candidates,
+        &links,
+        &subject_sem,
+        weights,
+        params,
+        Utc::now(),
+    ))
+}
+
+/// Pulls the vector candidate pool (`ORDER BY vector_distance_cos ... LIMIT
+/// candidate_pool_size`, same WHERE filters as `Db::search_memories`).
+async fn fetch_candidates(
+    db: &Db,
+    params: &CompositeParams,
+    blob: &[u8],
+    min_timestamp: DateTime<Utc>,
+) -> Result<Vec<Candidate>> {
     let mut sql = String::from(
         "SELECT id, firestore_pair_id, timestamp, session_id,
                 (1.0 - vector_distance_cos(conversation_embedding, ?)) AS cosine_sim
@@ -336,7 +429,7 @@ async fn score_candidates(
            AND conversation_embedding IS NOT NULL",
     );
     let mut args = vec![
-        turso::Value::Blob(blob.clone()),
+        turso::Value::Blob(blob.to_vec()),
         turso::Value::Text(params.user_id.clone()),
         turso::Value::Text(params.kg_id.clone()),
         turso::Value::Text(params.session_id.clone()),
@@ -356,10 +449,10 @@ async fn score_candidates(
         );
     }
     sql.push_str(" ORDER BY vector_distance_cos(conversation_embedding, ?) LIMIT ?");
-    args.push(turso::Value::Blob(blob.clone()));
+    args.push(turso::Value::Blob(blob.to_vec()));
     args.push(turso::Value::Integer(params.candidate_pool_size as i64));
 
-    let mut rows = conn.query(&sql, args).await?;
+    let mut rows = db.connection().query(&sql, args).await?;
     let mut candidates: Vec<Candidate> = Vec::new();
     while let Some(row) = rows.next().await? {
         candidates.push(Candidate {
@@ -370,59 +463,106 @@ async fn score_candidates(
             cosine: get_f64(&row, 4)?,
         });
     }
-    if candidates.is_empty() {
-        return Ok(Vec::new());
-    }
+    Ok(candidates)
+}
 
-    // Links for the candidate pool (basis for pair_freq / candidate_subjects).
+/// Pulls the subject links for the candidate pool (basis for pair_freq /
+/// candidate_subjects) plus the per-subject global link counts. `IN` lists
+/// are chunked ([`IN_CLAUSE_CHUNK_SIZE`]) and the results merged.
+async fn fetch_subject_links(db: &Db, candidates: &[Candidate]) -> Result<SubjectLinks> {
+    let conn = db.connection();
     let candidate_row_ids: Vec<String> = candidates.iter().map(|c| c.row_id.clone()).collect();
-    let sql = format!(
-        "SELECT pair_id, subject_id FROM subject_memory_pair_links WHERE pair_id IN ({})",
-        placeholders(candidate_row_ids.len())
-    );
-    let args: Vec<turso::Value> = candidate_row_ids
-        .iter()
-        .map(|id| turso::Value::Text(id.clone()))
-        .collect();
-    let mut rows = conn.query(&sql, args).await?;
-    let mut pair_subjects: HashMap<String, Vec<String>> = HashMap::new();
-    let mut subject_pairs: HashMap<String, Vec<String>> = HashMap::new();
-    while let Some(row) = rows.next().await? {
-        let pair_id = get_text(&row, 0)?;
-        let subject_id = get_text(&row, 1)?;
-        pair_subjects
-            .entry(pair_id.clone())
-            .or_default()
-            .push(subject_id.clone());
-        subject_pairs.entry(subject_id).or_default().push(pair_id);
-    }
-
-    // Per-subject global link counts (Go: `spc` subquery — counts over the
-    // whole table, not just the candidate pool).
-    let mut subject_link_counts: HashMap<String, i64> = HashMap::new();
-    if !subject_pairs.is_empty() {
-        let subject_ids: Vec<&String> = subject_pairs.keys().collect();
+    let mut links = SubjectLinks::default();
+    for chunk in candidate_row_ids.chunks(IN_CLAUSE_CHUNK_SIZE) {
         let sql = format!(
-            "SELECT subject_id, COUNT(*) FROM subject_memory_pair_links
-             WHERE subject_id IN ({}) GROUP BY subject_id",
-            placeholders(subject_ids.len())
+            "SELECT pair_id, subject_id FROM subject_memory_pair_links WHERE pair_id IN ({})",
+            placeholders(chunk.len())
         );
-        let args: Vec<turso::Value> = subject_ids
+        let args: Vec<turso::Value> = chunk
             .iter()
-            .map(|id| turso::Value::Text((*id).clone()))
+            .map(|id| turso::Value::Text(id.clone()))
             .collect();
         let mut rows = conn.query(&sql, args).await?;
         while let Some(row) = rows.next().await? {
-            subject_link_counts.insert(get_text(&row, 0)?, get_i64(&row, 1)?);
+            let pair_id = get_text(&row, 0)?;
+            let subject_id = get_text(&row, 1)?;
+            links
+                .pair_subjects
+                .entry(pair_id.clone())
+                .or_default()
+                .push(subject_id.clone());
+            links
+                .subject_pairs
+                .entry(subject_id)
+                .or_default()
+                .push(pair_id);
         }
     }
 
-    // pair_freq + max_freq (Go: `pair_freq` / `max_freq` CTEs).
+    let subject_ids: Vec<String> = links.subject_pairs.keys().cloned().collect();
+    for chunk in subject_ids.chunks(IN_CLAUSE_CHUNK_SIZE) {
+        let sql = format!(
+            "SELECT subject_id, COUNT(*) FROM subject_memory_pair_links
+             WHERE subject_id IN ({}) GROUP BY subject_id",
+            placeholders(chunk.len())
+        );
+        let args: Vec<turso::Value> = chunk
+            .iter()
+            .map(|id| turso::Value::Text(id.clone()))
+            .collect();
+        let mut rows = conn.query(&sql, args).await?;
+        while let Some(row) = rows.next().await? {
+            links
+                .subject_link_counts
+                .insert(get_text(&row, 0)?, get_i64(&row, 1)?);
+        }
+    }
+    Ok(links)
+}
+
+/// V2-only DB aggregate: per-subject semantic similarity to the query
+/// embedding (folded into a per-pair MAX inside [`score`]). The `IN` list is
+/// chunked ([`IN_CLAUSE_CHUNK_SIZE`]) and the results merged.
+async fn v2_aggregates(db: &Db, blob: &[u8], links: &SubjectLinks) -> Result<HashMap<String, f64>> {
+    let mut subject_sem: HashMap<String, f64> = HashMap::new();
+    if links.subject_pairs.is_empty() {
+        return Ok(subject_sem);
+    }
+    let subject_ids: Vec<&String> = links.subject_pairs.keys().collect();
+    for chunk in subject_ids.chunks(IN_CLAUSE_CHUNK_SIZE) {
+        let sql = format!(
+            "SELECT id, (1.0 - vector_distance_cos(embedding, ?)) FROM subjects
+             WHERE embedding IS NOT NULL AND id IN ({})",
+            placeholders(chunk.len())
+        );
+        let mut args = vec![turso::Value::Blob(blob.to_vec())];
+        args.extend(chunk.iter().map(|id| turso::Value::Text((*id).clone())));
+        let mut rows = db.connection().query(&sql, args).await?;
+        while let Some(row) = rows.next().await? {
+            subject_sem.insert(get_text(&row, 0)?, get_f64(&row, 1)?);
+        }
+    }
+    Ok(subject_sem)
+}
+
+/// Pure weighted scorer: computes per-candidate recency / frequency /
+/// (V2: recency-exp, subject sem match, session continuity, neighbor
+/// density) and the composite score, then orders by composite score DESC,
+/// timestamp DESC, pair id DESC and truncates to `params.limit`. No I/O.
+fn score(
+    candidates: &[Candidate],
+    links: &SubjectLinks,
+    subject_sem: &HashMap<String, f64>,
+    weights: Weights,
+    params: &CompositeParams,
+    now: DateTime<Utc>,
+) -> Vec<CompositeMemory> {
+    // Per-pair frequency and its pool-wide max (floored at 1).
     let mut pair_freq: HashMap<&str, f64> = HashMap::new();
-    for (pair_id, subjects) in &pair_subjects {
+    for (pair_id, subjects) in &links.pair_subjects {
         let total: i64 = subjects
             .iter()
-            .map(|sid| subject_link_counts.get(sid).copied().unwrap_or(0))
+            .map(|sid| links.subject_link_counts.get(sid).copied().unwrap_or(0))
             .sum();
         pair_freq.insert(pair_id.as_str(), total as f64);
     }
@@ -432,52 +572,30 @@ async fn score_candidates(
         .fold(f64::NEG_INFINITY, f64::max)
         .max(1.0);
 
-    // bounds (Go: `bounds` CTE).
+    // Timestamp bounds of the candidate pool.
+    let fallback_ts = params.min_timestamp.unwrap_or(DateTime::<Utc>::UNIX_EPOCH);
     let oldest = candidates
         .iter()
         .map(|c| c.timestamp)
         .min()
-        .unwrap_or(min_timestamp);
+        .unwrap_or(fallback_ts);
     let newest = candidates
         .iter()
         .map(|c| c.timestamp)
         .max()
-        .unwrap_or(min_timestamp);
+        .unwrap_or(fallback_ts);
     let span_secs = features::duration_seconds(newest - oldest);
 
-    // V2-only aggregates.
+    // V2-only pure aggregate: neighbor density — distinct candidate pairs
+    // sharing at least one subject.
     let is_v2 = params.variant == Variant::V2;
-    let mut subject_sem: HashMap<String, f64> = HashMap::new();
     let mut neighbor_density: HashMap<&str, f64> = HashMap::new();
     let mut density_max = 1.0f64;
-    let now = Utc::now();
     if is_v2 {
-        // subject_match (Go: `subject_match` CTE) — per-subject similarity,
-        // folded into a per-pair MAX below.
-        if !subject_pairs.is_empty() {
-            let subject_ids: Vec<&String> = subject_pairs.keys().collect();
-            let sql = format!(
-                "SELECT id, (1.0 - vector_distance_cos(embedding, ?)) FROM subjects
-                 WHERE embedding IS NOT NULL AND id IN ({})",
-                placeholders(subject_ids.len())
-            );
-            let mut args = vec![turso::Value::Blob(blob)];
-            args.extend(
-                subject_ids
-                    .iter()
-                    .map(|id| turso::Value::Text((*id).clone())),
-            );
-            let mut rows = conn.query(&sql, args).await?;
-            while let Some(row) = rows.next().await? {
-                subject_sem.insert(get_text(&row, 0)?, get_f64(&row, 1)?);
-            }
-        }
-        // neighbor_density (Go: `neighbor_density` CTE) — distinct candidate
-        // pairs sharing at least one subject.
-        for (pair_id, subjects) in &pair_subjects {
+        for (pair_id, subjects) in &links.pair_subjects {
             let mut neighbors: std::collections::HashSet<&str> = std::collections::HashSet::new();
             for sid in subjects {
-                if let Some(pairs) = subject_pairs.get(sid) {
+                if let Some(pairs) = links.subject_pairs.get(sid) {
                     for other in pairs {
                         if other != pair_id {
                             neighbors.insert(other.as_str());
@@ -496,9 +614,9 @@ async fn score_candidates(
             .max(1.0);
     }
 
-    // Score (Go: final SELECT of compositeSQLV1/compositeSQLV2).
+    // Weighted composite score.
     let mut out: Vec<CompositeMemory> = Vec::with_capacity(candidates.len());
-    for c in &candidates {
+    for c in candidates {
         let recency = if newest == oldest {
             1.0
         } else {
@@ -515,7 +633,8 @@ async fn score_candidates(
         if is_v2 {
             item.recency_exp =
                 (-features::duration_seconds(now - c.timestamp) / V2_RECENCY_TAU_SECS).exp();
-            item.subject_sem_match = pair_subjects
+            item.subject_sem_match = links
+                .pair_subjects
                 .get(&c.row_id)
                 .map(|subjects| {
                     subjects
@@ -546,7 +665,7 @@ async fn score_candidates(
                     + weights.session_continuity * item.session_continuity
                     + weights.neighbor_density * item.neighbor_density);
         } else {
-            // V1 does NOT apply the scale factor (matches compositeSQLV1).
+            // V1 intentionally ignores `scale`; only V2 multiplies by it.
             item.composite_score = weights.cosine * item.cosine_similarity
                 + weights.recency_linear * item.recency_score
                 + weights.subject_frequency * item.frequency_score;
@@ -570,10 +689,10 @@ async fn score_candidates(
             .then_with(|| b.pair_id.cmp(&a.pair_id))
     });
     out.truncate(params.limit);
-    Ok(out)
+    out
 }
 
-/// A retrieval event row for `retrieval_events` (Go: `LogEvent` args).
+/// A retrieval event row for `retrieval_events`.
 #[derive(Debug, Clone, Default)]
 pub struct RetrievalEvent {
     pub user_id: String,
@@ -588,7 +707,7 @@ pub struct RetrievalEvent {
     pub aux_features: Features,
 }
 
-/// Inserts a row into `retrieval_events` (Go: `LogEvent`). `weights` and
+/// Inserts a row into `retrieval_events`. `weights` and
 /// `aux_features` are stored as JSON text; `retrieved_pair_ids` as a JSON
 /// array of strings.
 pub async fn log_event(db: &Db, event: RetrievalEvent) -> Result<()> {
@@ -672,8 +791,7 @@ fn get_f64(row: &turso::Row, idx: usize) -> Result<f64> {
     }
 }
 
-/// Names the dominant intent among the first three weights
-/// (Go: `PredictedIntent`).
+/// Names the dominant intent among the first three weights.
 pub fn predicted_intent(w1: f64, w2: f64, w3: f64) -> &'static str {
     if w1 >= w2 && w1 >= w3 {
         return "semantic";
@@ -690,7 +808,8 @@ mod tests {
     use crate::db::{CreateMemoryPairParams, UpsertSubjectParams, EMBEDDING_DIMS};
     use chrono::TimeZone;
 
-    /// Port of Go `ExampleStaticPredictor` + the zero-weight fallback.
+    /// StaticPredictor returns its fixed weights; zero weights fall back to
+    /// the defaults.
     #[tokio::test]
     async fn static_predictor_predicts() {
         let predictor = StaticPredictor {
@@ -723,19 +842,19 @@ mod tests {
         assert_eq!(predicted_intent(0.5, 0.3, 0.2), "semantic");
         assert_eq!(predicted_intent(0.2, 0.5, 0.3), "temporal");
         assert_eq!(predicted_intent(0.1, 0.2, 0.7), "frequency");
-        // Ties prefer semantic, then temporal (Go's >= ordering).
+        // Ties prefer semantic, then temporal (>= comparisons).
         assert_eq!(predicted_intent(0.4, 0.4, 0.2), "semantic");
     }
 
     #[test]
-    fn weights_json_matches_go_tags() {
+    fn weights_json_uses_camel_case_wire_shape() {
         let w = default_weights();
         let json = serde_json::to_value(w).expect("serialize");
         assert_eq!(json["cosine"], 0.65);
         assert_eq!(json["recencyLinear"], 0.2);
         assert_eq!(json["subjectFrequency"], 0.15);
         assert_eq!(json["scale"], 1.0);
-        // omitempty zero-valued fields are skipped.
+        // zero-valued optional fields are skipped.
         assert!(json.get("recencyExp").is_none());
         assert!(json.get("neighborDensity").is_none());
     }
@@ -884,6 +1003,105 @@ mod tests {
         assert_eq!(b.neighbor_density, 0.0);
     }
 
+    /// The pure scorer, no DB: V1 ignores `scale`, V2 applies it, frequency
+    /// normalizes against the pool max, and ordering is composite DESC.
+    #[test]
+    fn score_is_pure_and_variant_correct() {
+        let t0 = Utc
+            .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+            .single()
+            .expect("t0");
+        let t1 = Utc
+            .with_ymd_and_hms(2026, 1, 2, 0, 0, 0)
+            .single()
+            .expect("t1");
+        let candidates = vec![
+            Candidate {
+                row_id: "row-a".to_string(),
+                pair_id: "pair-a".to_string(),
+                timestamp: t0,
+                session_id: String::new(),
+                cosine: 0.9,
+            },
+            Candidate {
+                row_id: "row-b".to_string(),
+                pair_id: "pair-b".to_string(),
+                timestamp: t1,
+                session_id: "thread-x".to_string(),
+                cosine: 0.5,
+            },
+        ];
+        let links = SubjectLinks {
+            pair_subjects: HashMap::from([
+                ("row-a".to_string(), vec!["s1".to_string()]),
+                ("row-b".to_string(), vec!["s1".to_string()]),
+            ]),
+            subject_pairs: HashMap::from([(
+                "s1".to_string(),
+                vec!["row-a".to_string(), "row-b".to_string()],
+            )]),
+            subject_link_counts: HashMap::from([("s1".to_string(), 4)]),
+        };
+        let now = t1;
+
+        // V1: cosine-only weights; scale must be ignored.
+        let weights = Weights {
+            cosine: 1.0,
+            recency_linear: 0.0,
+            subject_frequency: 0.0,
+            scale: 7.0,
+            ..Weights::ZERO
+        };
+        let params = CompositeParams {
+            variant: Variant::Legacy,
+            limit: 10,
+            ..CompositeParams::default()
+        };
+        let got = score(&candidates, &links, &HashMap::new(), weights, &params, now);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].pair_id, "pair-a");
+        assert!((got[0].composite_score - 0.9).abs() < 1e-9, "scale ignored");
+        // Both pairs share s1 (count 4): frequency normalizes to 1.0.
+        assert!((got[0].frequency_score - 1.0).abs() < 1e-9);
+        assert!((got[1].frequency_score - 1.0).abs() < 1e-9);
+        // V2-only features stay zero on the V1 path.
+        assert_eq!(got[0].neighbor_density, 0.0);
+
+        // V2: session continuity flips the order and scale applies.
+        let weights = Weights {
+            cosine: 1.0,
+            session_continuity: 1.0,
+            scale: 2.0,
+            ..Weights::ZERO
+        };
+        let params = CompositeParams {
+            variant: Variant::V2,
+            current_session_id: "thread-x".to_string(),
+            limit: 10,
+            ..CompositeParams::default()
+        };
+        let got = score(&candidates, &links, &HashMap::new(), weights, &params, now);
+        assert_eq!(got[0].pair_id, "pair-b");
+        assert!((got[0].session_continuity - 1.0).abs() < 1e-9);
+        assert!(
+            (got[0].composite_score - 2.0 * (0.5 + 1.0)).abs() < 1e-9,
+            "V2 applies scale: {}",
+            got[0].composite_score
+        );
+        assert!((got[1].composite_score - 2.0 * 0.9).abs() < 1e-9);
+        // Both candidates neighbor each other through s1.
+        assert!((got[0].neighbor_density - 1.0).abs() < 1e-9);
+
+        // limit truncates.
+        let params = CompositeParams {
+            variant: Variant::Legacy,
+            limit: 1,
+            ..CompositeParams::default()
+        };
+        let got = score(&candidates, &links, &HashMap::new(), weights, &params, now);
+        assert_eq!(got.len(), 1);
+    }
+
     #[tokio::test]
     async fn composite_retrieve_v1_respects_limit_and_excludes() {
         let db = Db::open_memory().await.expect("open");
@@ -1007,8 +1225,8 @@ mod tests {
             RetrievalEvent {
                 user_id: "u1".to_string(),
                 kg_id: "kg".to_string(),
-                // Go's zero-value Weights{} (Rust `Weights::default()` is
-                // DefaultWeights, so zero must be explicit).
+                // All-zero weights must be explicit: `Weights::default()`
+                // is the non-zero standard set, not zero.
                 weights: Weights::ZERO,
                 ..RetrievalEvent::default()
             },

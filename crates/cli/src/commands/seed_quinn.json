@@ -1,0 +1,232 @@
+[
+  {
+    "id": "seed-quinn-001",
+    "prompt": "I'm Quinn, a software engineer. My team just approved my proposal to rewrite our Go memory service in Rust. Where should I start?",
+    "response": "Congrats! Start by treating the Go code as the spec: freeze its behavior with integration tests, then port the storage layer first since everything else depends on it. Keep the wire format identical so you can run both side by side.",
+    "summary": "Quinn kicked off the Rust rewrite of the Go memory service; plan is to port the storage layer first behind identical wire formats.",
+    "sessionId": "work",
+    "daysAgo": 28,
+    "subjects": [
+      {
+        "text": "Rust rewrite",
+        "description": "Quinn's project rewriting the Go memory service in Rust",
+        "key": true
+      },
+      {
+        "text": "Go memory service",
+        "description": "The legacy Go service being replaced",
+        "key": false
+      }
+    ]
+  },
+  {
+    "id": "seed-quinn-002",
+    "prompt": "For the Rust rewrite, should we keep Postgres or try an embedded SQLite-family database with vector support?",
+    "response": "For a local-first harness, an embedded engine is compelling: zero ops, file-backed databases, and native F32 vector columns cover your cosine-similarity search. Spike it behind your storage trait and benchmark against Postgres before committing.",
+    "summary": "Discussed database choice for the Rust rewrite: embedded SQLite-family engine with native vector columns vs Postgres.",
+    "sessionId": "work",
+    "daysAgo": 24,
+    "subjects": [
+      {
+        "text": "Rust rewrite",
+        "description": "Quinn's project rewriting the Go memory service in Rust",
+        "key": true
+      },
+      {
+        "text": "vector search",
+        "description": "Embedding similarity search design decisions",
+        "key": false
+      }
+    ]
+  },
+  {
+    "id": "seed-quinn-003",
+    "prompt": "The borrow checker is destroying me on the Rust rewrite. I keep fighting lifetimes in the async storage layer.",
+    "response": "Classic week-three Rust. In async code, prefer owned data over references across await points: clone cheap handles, wrap shared state in Arc, and let connections be cloneable. Most lifetime fights in async traits disappear once you stop borrowing across awaits.",
+    "summary": "Quinn fought the borrow checker in the async storage layer; advice was to use owned data and Arc instead of borrowing across await points.",
+    "sessionId": "work",
+    "daysAgo": 21,
+    "subjects": [
+      {
+        "text": "Rust rewrite",
+        "description": "Quinn's project rewriting the Go memory service in Rust",
+        "key": true
+      },
+      {
+        "text": "borrow checker",
+        "description": "Rust ownership and lifetime struggles",
+        "key": false
+      }
+    ]
+  },
+  {
+    "id": "seed-quinn-004",
+    "prompt": "Planning a three-day hiking trip around Mount Rainier in late September with my sister Ava. Which loop should we do?",
+    "response": "Late September is perfect: golden larches and fewer crowds. The Spray Park to Mowich Lake loop fits three days well. Book the Mowich Lake campsites early, and pack layers — afternoon storms roll in fast on the northwest side.",
+    "summary": "Quinn planned a 3-day late-September Mount Rainier hiking trip with sister Ava; Spray Park - Mowich Lake loop recommended.",
+    "sessionId": "personal",
+    "daysAgo": 18,
+    "subjects": [
+      {
+        "text": "Mount Rainier trip",
+        "description": "Quinn's 3-day September hiking trip with sister Ava",
+        "key": true
+      },
+      {
+        "text": "hiking",
+        "description": "Quinn's hiking hobby and trips",
+        "key": false
+      }
+    ]
+  },
+  {
+    "id": "seed-quinn-005",
+    "prompt": "My old boots gave me blisters on the last trail. What should I look for in new ones before the Rainier trip?",
+    "response": "Fit beats brand: shop in the afternoon when feet are swollen, leave a thumb's width at the toe, and break them in for at least 30 trail miles before Rainier. A stiffer midsole helps with Spray Park's rocky stretches.",
+    "summary": "Quinn shopped for new hiking boots ahead of the Mount Rainier trip; fit and break-in advice.",
+    "sessionId": "personal",
+    "daysAgo": 15,
+    "subjects": [
+      {
+        "text": "Mount Rainier trip",
+        "description": "Quinn's 3-day September hiking trip with sister Ava",
+        "key": true
+      },
+      {
+        "text": "hiking gear",
+        "description": "Boots and equipment for Quinn's hikes",
+        "key": false
+      }
+    ]
+  },
+  {
+    "id": "seed-quinn-006",
+    "prompt": "I started a sourdough starter! Named it Ferris. Day one: flour, water, hope. What's the feeding schedule?",
+    "response": "Welcome to the cult, and excellent name. Feed Ferris 1:1:1 (starter:flour:water by weight) once a day at room temperature. Expect sluggish bubbles by day three and real activity around day five to seven. The hooch smell is normal — just stir it in.",
+    "summary": "Quinn started a sourdough starter named Ferris; got a 1:1:1 daily feeding schedule.",
+    "sessionId": "personal",
+    "daysAgo": 14,
+    "subjects": [
+      {
+        "text": "sourdough baking",
+        "description": "Quinn's sourdough hobby; starter named Ferris",
+        "key": true
+      }
+    ]
+  },
+  {
+    "id": "seed-quinn-007",
+    "prompt": "First sourdough loaf came out like a brick. Dense, gummy crumb. Ferris betrayed me. What went wrong?",
+    "response": "Ferris is innocent — a dense gummy crumb usually means underproofed dough or a starter that wasn't at peak. Use the float test before mixing, push bulk fermentation until the dough is jiggly and roughly 50% larger, and bake by internal temp (96-99C) rather than the clock.",
+    "summary": "Quinn's first sourdough loaf was dense and gummy; diagnosed as underproofing, advised float test and longer bulk fermentation.",
+    "sessionId": "personal",
+    "daysAgo": 10,
+    "subjects": [
+      {
+        "text": "sourdough baking",
+        "description": "Quinn's sourdough hobby; starter named Ferris",
+        "key": true
+      }
+    ]
+  },
+  {
+    "id": "seed-quinn-008",
+    "prompt": "Update: bumped hydration to 75% and stretched bulk fermentation like you said. The new loaf has an open crumb and a crackly crust!",
+    "response": "That's the loaf! 75% hydration plus patient bulk fermentation is a great house recipe. Note today's timings and temperatures — repeatability is the real skill. Next experiment: 10% whole wheat for deeper flavor.",
+    "summary": "Quinn's sourdough succeeded at 75% hydration with longer bulk fermentation; next step is adding whole wheat.",
+    "sessionId": "personal",
+    "daysAgo": 7,
+    "subjects": [
+      {
+        "text": "sourdough baking",
+        "description": "Quinn's sourdough hobby; starter named Ferris",
+        "key": true
+      }
+    ]
+  },
+  {
+    "id": "seed-quinn-009",
+    "prompt": "Preferences for our pairing sessions: I use Helix, dark mode everything, spaces over tabs, and I think best before 10am with black coffee.",
+    "response": "Noted: Helix keybindings in examples, dark-mode-friendly screenshots, spaces in snippets, and we'll schedule deep work — like the Rust rewrite's storage layer — for your pre-10am coffee window.",
+    "summary": "Quinn's working preferences: Helix editor, dark mode, spaces over tabs, deep work before 10am with black coffee.",
+    "sessionId": "work",
+    "daysAgo": 12,
+    "subjects": [
+      {
+        "text": "preferences",
+        "description": "Quinn's tooling and working-style preferences",
+        "key": true
+      },
+      {
+        "text": "Rust rewrite",
+        "description": "Quinn's project rewriting the Go memory service in Rust",
+        "key": false
+      }
+    ]
+  },
+  {
+    "id": "seed-quinn-010",
+    "prompt": "Vector search in the Rust rewrite is returning weird neighbors. Similarities cluster around 0.3 even for unrelated text.",
+    "response": "Check three things: that you're converting distance to similarity (similarity = 1 - cosine distance), that query and document vectors come from the same embedding model, and that you're not truncating the 768-dim vectors when encoding them as little-endian blobs.",
+    "summary": "Debugged vector search in the Rust rewrite: distance vs similarity confusion and embedding-model mismatch were the suspects.",
+    "sessionId": "work",
+    "daysAgo": 5,
+    "subjects": [
+      {
+        "text": "Rust rewrite",
+        "description": "Quinn's project rewriting the Go memory service in Rust",
+        "key": true
+      },
+      {
+        "text": "vector search",
+        "description": "Embedding similarity search design decisions",
+        "key": false
+      }
+    ]
+  },
+  {
+    "id": "seed-quinn-011",
+    "prompt": "Back from Rainier! Ava and I did the Spray Park loop. I baked a sourdough loaf as trail bread and spent an evening at camp explaining the Rust rewrite to her.",
+    "response": "Sounds like a perfect trip: golden larches, Ferris-powered trail bread, and you know you've internalized the rewrite when you can explain ownership semantics around a campfire. How did the new boots hold up?",
+    "summary": "Quinn returned from the Mount Rainier trip with Ava; brought homemade sourdough as trail bread and talked through the Rust rewrite at camp.",
+    "sessionId": "personal",
+    "daysAgo": 2,
+    "subjects": [
+      {
+        "text": "Mount Rainier trip",
+        "description": "Quinn's 3-day September hiking trip with sister Ava",
+        "key": true
+      },
+      {
+        "text": "sourdough baking",
+        "description": "Quinn's sourdough hobby; starter named Ferris",
+        "key": false
+      },
+      {
+        "text": "Rust rewrite",
+        "description": "Quinn's project rewriting the Go memory service in Rust",
+        "key": false
+      }
+    ]
+  },
+  {
+    "id": "seed-quinn-012",
+    "prompt": "Demo day: the Rust rewrite passed the full Go test suite and memory search latency dropped 40%. Team wants to ship it next sprint.",
+    "response": "Huge milestone — passing the legacy suite is the real finish line, the latency win is the bonus. Ship it behind a flag, mirror traffic for a week, and celebrate properly: this calls for a fresh sourdough bake.",
+    "summary": "The Rust rewrite passed the full Go test suite with 40% faster memory search; shipping next sprint behind a flag.",
+    "sessionId": "work",
+    "daysAgo": 1,
+    "subjects": [
+      {
+        "text": "Rust rewrite",
+        "description": "Quinn's project rewriting the Go memory service in Rust",
+        "key": true
+      },
+      {
+        "text": "vector search",
+        "description": "Embedding similarity search design decisions",
+        "key": false
+      }
+    ]
+  }
+]

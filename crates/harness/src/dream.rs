@@ -1,8 +1,8 @@
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: MIT
 //! Dream pipeline: offline subject extraction/consolidation over a user's
 //! stored memories, locally verifiable with Ollama (gemma3:4b +
-//! embeddinggemma). New module — a scaled-down local port of Ditto's
-//! production "dreaming pipeline".
+//! embeddinggemma). A scaled-down local adaptation of Ditto's production
+//! "dreaming pipeline".
 //!
 //! Stages:
 //! 1. **EXTRACT** (the only LLM stage at write time): for each recent memory
@@ -173,7 +173,7 @@ impl Dreamer {
             .await;
 
         let mut entries = load_subject_entries(db, user_id, &kg_id).await?;
-        let mut first_model_error: Option<Error> = None;
+        let mut first_error: Option<Error> = None;
         let mut any_model_ok = false;
 
         for (pair, outcome) in pairs.iter().zip(extractions) {
@@ -184,8 +184,8 @@ impl Dreamer {
                 }
                 Err(err) => {
                     tracing::warn!(pair_id = %pair.id, error = %err, "dream: extraction call failed");
-                    if first_model_error.is_none() {
-                        first_model_error = Some(err);
+                    if first_error.is_none() {
+                        first_error = Some(err);
                     }
                     continue;
                 }
@@ -210,14 +210,30 @@ impl Dreamer {
                 .iter()
                 .map(|s| format!("{}\n{}", s.name, s.description).trim().to_string())
                 .collect();
-            let embedded = self.embedder.embed(EmbedRequest { texts }).await?;
+            // Same policy as model failures above: one pair's embedding
+            // failure is logged and skipped, never aborts the whole run.
+            let embedded = match self.embedder.embed(EmbedRequest { texts }).await {
+                Ok(embedded) => embedded,
+                Err(err) => {
+                    tracing::warn!(pair_id = %pair.id, error = %err, "dream: subject embedding failed");
+                    if first_error.is_none() {
+                        first_error = Some(err);
+                    }
+                    continue;
+                }
+            };
             costs.add(embedded.cost.as_ref());
             if embedded.embeddings.len() != extraction.subjects.len() {
-                return Err(Error::Embedding(format!(
+                let err = Error::Embedding(format!(
                     "dream: embedder returned {} embeddings for {} subjects",
                     embedded.embeddings.len(),
                     extraction.subjects.len()
-                )));
+                ));
+                tracing::warn!(pair_id = %pair.id, error = %err, "dream: subject embedding failed");
+                if first_error.is_none() {
+                    first_error = Some(err);
+                }
+                continue;
             }
 
             for (subject, embedding) in extraction.subjects.iter().zip(embedded.embeddings) {
@@ -244,7 +260,7 @@ impl Dreamer {
 
         // All model calls failed and there was work to do: surface the error.
         if !pairs.is_empty() && !any_model_ok {
-            if let Some(err) = first_model_error {
+            if let Some(err) = first_error {
                 return Err(err);
             }
         }
@@ -456,12 +472,21 @@ impl Dreamer {
                 }
             }
 
-            let embedded = self
+            // Same policy as the extract stage: one subject's embedding
+            // failure is logged and skipped, never aborts the whole run.
+            let embedded = match self
                 .embedder
                 .embed(EmbedRequest {
                     texts: vec![format!("{name}\n{summary}")],
                 })
-                .await?;
+                .await
+            {
+                Ok(embedded) => embedded,
+                Err(err) => {
+                    tracing::warn!(subject_id = %id, error = %err, "dream: refine embedding failed");
+                    continue;
+                }
+            };
             costs.add(embedded.cost.as_ref());
             let Some(embedding) = embedded.embeddings.first() else {
                 continue;
@@ -651,11 +676,11 @@ fn conversation_text(user_text: &str, assistant_text: &str) -> String {
         (true, false) => format!("Assistant: {assistant_text}"),
         (false, false) => format!("User: {user_text}\n\nAssistant: {assistant_text}"),
     };
-    truncate_chars(&text, MAX_CONVERSATION_BYTES)
+    truncate_at_char_boundary(&text, MAX_CONVERSATION_BYTES)
 }
 
 /// Truncates to at most `max_bytes` bytes on a valid char boundary.
-fn truncate_chars(s: &str, max_bytes: usize) -> String {
+fn truncate_at_char_boundary(s: &str, max_bytes: usize) -> String {
     if s.len() <= max_bytes {
         return s.to_string();
     }
@@ -699,7 +724,7 @@ fn refine_prompt(name: &str, merged_description: &str) -> String {
     )
 }
 
-/// Returns the substring spanning the first `{{` to the last `}}`, which also
+/// Returns the substring spanning the first `{` to the last `}`, which also
 /// strips surrounding prose and markdown code fences.
 fn first_json_object(text: &str) -> Option<&str> {
     let start = text.find('{')?;

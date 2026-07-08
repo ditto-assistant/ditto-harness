@@ -1,8 +1,7 @@
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: MIT
 //! Model and embedder providers: Ollama plus OpenAI-compatible endpoints
 //! (vLLM, OpenRouter), bridged to the [`Model`]/[`Embedder`] traits via
-//! rig-core. New module (no direct Go counterpart; Go hosts inject their own
-//! `harness.Model`).
+//! rig-core.
 //!
 //! The bridge sits on rig's low-level `CompletionModel` trait (not its typed
 //! agents) so the harness can pass dynamic tool definitions through
@@ -149,7 +148,9 @@ impl ChatModelConfig {
                     .base_url(base_url)
                     .build()
                     .map_err(|err| Error::Model(format!("openai-compatible client: {err}")))?;
-                let provider = if base_url == OPENROUTER_BASE_URL {
+                let provider = if base_url.trim_end_matches('/')
+                    == OPENROUTER_BASE_URL.trim_end_matches('/')
+                {
                     "openrouter"
                 } else {
                     "openai-compat"
@@ -229,10 +230,9 @@ fn to_rig_messages(messages: &[ChatMessage]) -> Result<Vec<RigMessage>> {
                 if parts.is_empty() {
                     parts.push(RigUserContent::Text(RigText::new(String::new())));
                 }
-                match OneOrMany::many(parts) {
-                    Ok(content) => out.push(RigMessage::User { content }),
-                    Err(_) => continue,
-                }
+                // `parts` is never empty (a blank text part is pushed above).
+                let content = OneOrMany::many(parts).expect("parts is non-empty");
+                out.push(RigMessage::User { content });
             }
             "assistant" => {
                 let mut parts: Vec<AssistantContent> = msg
@@ -388,7 +388,14 @@ pub struct OllamaEmbedder {
     pub base_url: String,
     pub model: String,
     pub dims: usize,
+    /// Shared HTTP client (connection pool + request timeout), built once in
+    /// [`OllamaEmbedder::new`] and reused across `embed` calls.
+    client: reqwest::Client,
 }
+
+/// Request timeout for embedding calls; large batches on a cold model can be
+/// slow, but a hung server must not stall the caller forever.
+const EMBED_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 impl Default for OllamaEmbedder {
     fn default() -> OllamaEmbedder {
@@ -403,6 +410,12 @@ impl OllamaEmbedder {
             base_url: base_url.into(),
             model: DEFAULT_EMBED_MODEL.to_string(),
             dims: DEFAULT_EMBED_DIMS,
+            client: reqwest::Client::builder()
+                .timeout(EMBED_REQUEST_TIMEOUT)
+                .build()
+                // Builder failure is a startup programming/TLS error; falling
+                // back to a default client would silently drop the timeout.
+                .expect("build embedder http client"),
         }
     }
 }
@@ -437,7 +450,8 @@ impl Embedder for OllamaEmbedder {
             model: &self.model,
             input: &req.texts,
         };
-        let response = reqwest::Client::new()
+        let response = self
+            .client
             .post(&url)
             .json(&body)
             .send()

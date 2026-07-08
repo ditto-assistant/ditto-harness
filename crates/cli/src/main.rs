@@ -1,9 +1,8 @@
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: MIT
 //! ditto-harness CLI: seed/dream/search/subjects/chat against a local Turso
 //! database with Ollama / OpenRouter / vLLM model providers.
 //!
-//! The clap surface lives here (architect-owned); each subcommand dispatches
-//! to its own handler file under `commands/` (CLI port agent-owned).
+//! Each subcommand dispatches to its handler under `commands/`.
 
 mod commands;
 
@@ -101,6 +100,15 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Surface harness tracing diagnostics (e.g. dream partial failures) on
+    // stderr. Default filter is `warn`; RUST_LOG overrides it.
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .init();
     let cli = Cli::parse();
     match cli.command {
         Command::Seed { file } => commands::seed::run(&cli.common, file.as_deref()).await,

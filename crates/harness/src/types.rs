@@ -1,10 +1,10 @@
-// SPDX-License-Identifier: AGPL-3.0-or-later
-//! Core shared types, traits, and errors ported from Go `pkg/harness/types.go`
-//! (plus the tiny cost collector from `pkg/cost`).
+// SPDX-License-Identifier: MIT
+//! Core shared types, traits, and errors for the harness (plus the tiny
+//! cost collector).
 //!
-//! JSON field names match the Go `json:"..."` tags exactly so payloads stay
-//! wire-compatible with the Go harness. Fields tagged `omitempty` in Go are
-//! skipped here when they hold their zero value.
+//! Field names and JSON shapes intentionally match the original Ditto
+//! backend's wire format for compatibility. Optional fields are skipped
+//! during serialization when they hold their zero value.
 
 use std::collections::BTreeMap;
 
@@ -13,13 +13,13 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Prefix used to derive a knowledge-graph id from a user id (Go: `DefaultKGPrefix`).
+/// Prefix used to derive a knowledge-graph id from a user id.
 pub const DEFAULT_KG_PREFIX: &str = "user_memories_";
 
-/// Session id used when none is provided (Go: `MainSessionID`).
+/// Session id used when none is provided.
 pub const MAIN_SESSION_ID: &str = "main";
 
-/// Returns the default knowledge-graph id for a user (Go: `harness.KGID`).
+/// Returns the default knowledge-graph id for a user.
 pub fn kg_id(user_id: &str) -> String {
     format!("{DEFAULT_KG_PREFIX}{user_id}")
 }
@@ -52,7 +52,7 @@ pub enum Error {
 /// Crate-wide result alias.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
-/// Content part type (Go: `ContentType`). Serialized as the Go string values.
+/// Content part type. Serialized as the wire string values below.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ContentType {
     #[serde(rename = "text")]
@@ -65,33 +65,33 @@ pub enum ContentType {
     ToolResult,
 }
 
-/// A model-issued tool call (Go: `ToolCall`). `args` carries raw JSON.
+/// A model-issued tool call. `args` carries raw JSON.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ToolCall {
     #[serde(default)]
     pub id: String,
     #[serde(default)]
     pub name: String,
-    /// Raw JSON arguments (Go: `json.RawMessage`); `Null` means absent.
+    /// Raw JSON arguments; `Null` means absent.
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub args: Value,
 }
 
-/// The result of executing a tool call (Go: `ToolCallResponse`).
+/// The result of executing a tool call.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ToolCallResponse {
     #[serde(default)]
     pub id: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub name: String,
-    /// Raw JSON output (Go: `json.RawMessage`); `Null` means absent.
+    /// Raw JSON output; `Null` means absent.
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub output: Value,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub error: String,
 }
 
-/// A single content part of a chat message or memory (Go: `Content`).
+/// A single content part of a chat message or memory.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Content {
@@ -118,7 +118,7 @@ impl Content {
     }
 }
 
-/// A node in the seed-memory tree persisted with a saved pair (Go: `SeedMemoryNode`).
+/// A node in the seed-memory tree persisted with a saved pair.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SeedMemoryNode {
@@ -128,7 +128,7 @@ pub struct SeedMemoryNode {
     pub children: Vec<SeedMemoryNode>,
 }
 
-/// Metadata describing how a retrieval was performed (Go: `RetrievalMetadata`).
+/// Metadata describing how a retrieval was performed.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RetrievalMetadata {
@@ -146,7 +146,7 @@ pub struct RetrievalMetadata {
     pub query_embedding_model: String,
 }
 
-/// A stored memory pair plus retrieval scores (Go: `Memory`).
+/// A stored memory pair plus retrieval scores.
 ///
 /// `id` is the public pair id (`firestore_pair_id` column); `source_pair_id`
 /// is the internal row UUID.
@@ -179,7 +179,7 @@ pub struct Memory {
     pub source: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub source_context: String,
-    /// Always serialized (Go has no omitempty here); RFC3339.
+    /// Always serialized (never skipped as empty); RFC3339.
     pub timestamp: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "is_zero_i32")]
     pub timezone_offset: i32,
@@ -187,7 +187,7 @@ pub struct Memory {
     pub seed_memories: Vec<SeedMemoryNode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retrieval_metadata: Option<RetrievalMetadata>,
-    /// Never serialized (Go: `json:"-"`).
+    /// Never serialized.
     #[serde(skip)]
     pub embedding: Vec<f32>,
     #[serde(default, skip_serializing_if = "is_zero_f64")]
@@ -241,7 +241,7 @@ impl Default for Memory {
     }
 }
 
-/// A subject-graph node (Go: `Subject`).
+/// A subject-graph node.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Subject {
@@ -251,13 +251,13 @@ pub struct Subject {
     pub user_id: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub kg_id: String,
-    /// Always serialized (Go has no omitempty here).
+    /// Always serialized (never skipped as empty).
     pub text: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub key: bool,
-    /// Never serialized (Go: `json:"-"`).
+    /// Never serialized.
     #[serde(skip)]
     pub embedding: Vec<f32>,
     #[serde(default, skip_serializing_if = "is_zero_f64")]
@@ -266,7 +266,7 @@ pub struct Subject {
     pub memory_count: i64,
 }
 
-/// Token usage for a single model/embedding call (Go: `Usage`).
+/// Token usage for a single model/embedding call.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Usage {
@@ -282,7 +282,7 @@ pub struct Usage {
     pub total_tokens: i64,
 }
 
-/// Monetary cost (Go: `Cost`).
+/// Monetary cost.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Cost {
@@ -292,20 +292,20 @@ pub struct Cost {
     pub amount: f64,
 }
 
-/// Usage paired with its cost (Go: `CostedUsage`). Both fields always serialize.
+/// Usage paired with its cost. Both fields always serialize.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CostedUsage {
     pub usage: Usage,
     pub cost: Cost,
 }
 
-/// Request to embed one or more texts (Go: `EmbedRequest`).
+/// Request to embed one or more texts.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EmbedRequest {
     pub texts: Vec<String>,
 }
 
-/// Embedding response (Go: `EmbedResponse`).
+/// Embedding response.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EmbedResponse {
     pub embeddings: Vec<Vec<f32>>,
@@ -315,14 +315,28 @@ pub struct EmbedResponse {
     pub metadata: Option<serde_json::Map<String, Value>>,
 }
 
-/// Produces embeddings for texts (Go: `Embedder`). Implementations must be
+/// Produces embeddings for texts. Implementations must be
 /// `Send + Sync` so they can be shared behind `Arc<dyn Embedder>`.
+///
+/// Contract:
+/// - Every embedding must be exactly 768-dimensional
+///   ([`crate::db::EMBEDDING_DIMS`]; the schema stores `F32_BLOB(768)`).
+///   Other lengths error — at write time for stored embeddings, at query
+///   time for query embeddings.
+/// - `embeddings` must be 1:1 with `texts`, in order: callers index results
+///   by input position. `Store::embed_texts` drops blank inputs before
+///   calling, so implementations never see empty strings.
+/// - The crate's similarity thresholds
+///   ([`crate::memory::DEFAULT_MIN_SIMILARITY`] 0.15,
+///   [`crate::dream::SUBJECT_MERGE_THRESHOLD`] 0.75) are calibrated for
+///   embeddinggemma. A different embedder shifts what those cosine values
+///   mean; expect to retune them.
 #[async_trait]
 pub trait Embedder: Send + Sync {
     async fn embed(&self, req: EmbedRequest) -> Result<EmbedResponse>;
 }
 
-/// A chat message in the agent loop (Go: `ChatMessage`).
+/// A chat message in the agent loop.
 /// `role` is one of "system" | "user" | "assistant" | "tool".
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -337,7 +351,7 @@ pub struct ChatMessage {
     pub tool_call_id: String,
 }
 
-/// One model turn result or stream delta (Go: `ChatChunk`).
+/// One model turn result or stream delta.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChatChunk {
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -353,7 +367,7 @@ pub struct ChatChunk {
 /// Callback receiving streamed [`ChatChunk`] deltas during [`Model::next_streaming`].
 pub type OnChunk<'a> = &'a (dyn Fn(ChatChunk) + Send + Sync);
 
-/// A chat model (Go: `Model`).
+/// A chat model.
 ///
 /// `next` performs one turn: given the conversation and available tool
 /// definitions it returns either final text (`tool_call == None`) or a single
@@ -364,6 +378,10 @@ pub type OnChunk<'a> = &'a (dyn Fn(ChatChunk) + Send + Sync);
 /// carrying `cost`) through `on_chunk`, and returns the *aggregated* final
 /// chunk — the same value `next` would have returned. The default
 /// implementation calls `next` once and emits the full chunk a single time.
+///
+/// Note: the built-in agent loop drives `next` only (its `run_streaming`
+/// streams loop *events*, not tokens); `next_streaming` is public API for
+/// hosts that surface token-level deltas themselves.
 #[async_trait]
 pub trait Model: Send + Sync {
     async fn next(&self, messages: &[ChatMessage], tools: &[ToolDefinition]) -> Result<ChatChunk>;
@@ -380,7 +398,7 @@ pub trait Model: Send + Sync {
     }
 }
 
-/// JSON-schema description of a callable tool (Go: `ToolDefinition`).
+/// JSON-schema description of a callable tool.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolDefinition {
@@ -393,18 +411,18 @@ pub struct ToolDefinition {
     pub input_schema: Value,
 }
 
-/// A callable tool (Go: `Tool`).
+/// A callable tool.
 ///
-/// Unlike Go (whose `Call` returns a full `ToolCallResponse`), `execute`
-/// returns only the JSON output payload; the agent loop wraps it into a
-/// [`ToolCallResponse`] (filling `id`/`name`, mapping `Err` to `error`).
+/// `execute` returns only the JSON output payload; the agent loop wraps it
+/// into a [`ToolCallResponse`] (filling `id`/`name`, mapping `Err` to
+/// `error`).
 #[async_trait]
 pub trait Tool: Send + Sync {
     fn definition(&self) -> ToolDefinition;
     async fn execute(&self, args: Value) -> Result<Value>;
 }
 
-/// Accumulates per-call costs during an agent run (Go: `pkg/cost.Collector`).
+/// Accumulates per-call costs during an agent run.
 #[derive(Debug, Clone, Default)]
 pub struct CostCollector {
     items: Vec<CostedUsage>,
@@ -428,7 +446,7 @@ impl CostCollector {
         self.items
     }
 
-    /// Sums recorded amounts (last non-empty currency wins, as in Go).
+    /// Sums recorded amounts; the last non-empty currency wins.
     pub fn total(&self) -> Cost {
         let mut total = Cost::default();
         for item in &self.items {
@@ -458,7 +476,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn memory_json_matches_go_field_names() {
+    fn memory_json_matches_wire_field_names() {
         let mem = Memory {
             id: "pair-1".into(),
             source_pair_id: "row-uuid".into(),
@@ -485,14 +503,14 @@ mod tests {
         ] {
             assert!(obj.contains_key(key), "missing key {key}");
         }
-        // omitempty: zero scores and empty strings are skipped.
+        // Zero scores and empty strings are skipped during serialization.
         for key in ["title", "prompt", "recencyScore", "compositeScore", "input"] {
             assert!(!obj.contains_key(key), "unexpected key {key}");
         }
     }
 
     #[test]
-    fn kg_id_matches_go() {
+    fn kg_id_derives_default_prefix() {
         assert_eq!(kg_id("abc"), "user_memories_abc");
     }
 }

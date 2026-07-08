@@ -1,23 +1,21 @@
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: MIT
 //! Slim, token-efficient memory payloads for tool results.
-//! Port of Go `pkg/memory/slim.go`.
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::types::{ContentType, Memory};
 
-/// Default preview length in bytes (Go: `DefaultPreviewLen`).
+/// Default preview length in bytes.
 pub const DEFAULT_PREVIEW_LEN: usize = 500;
-/// Default per-field byte budget for fetched memories
-/// (Go: `DefaultFetchMaxBytes`).
+/// Default per-field byte budget for fetched memories.
 pub const DEFAULT_FETCH_MAX_BYTES: usize = 8000;
 
-/// Truncation marker inserted by [`middle_truncate_utf8`] (Go inline const).
+/// Truncation marker inserted by [`middle_truncate_utf8`].
 const MIDDLE_TRUNCATION_MARKER: &str = "\n...[truncated]...\n";
 
-/// Compact memory representation returned by memory tools
-/// (Go: `SlimMemory`). JSON field names match Go tags.
+/// Compact memory representation returned by memory tools. JSON field names
+/// are camelCase on the wire.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SlimMemory {
@@ -42,8 +40,7 @@ pub struct SlimMemory {
     pub char_len: i64,
 }
 
-/// Full slim view: user/ditto text untruncated, plus summary
-/// (Go: `ToSlimMemory`).
+/// Full slim view: user/ditto text untruncated, plus summary.
 pub fn to_slim_memory(mem: &Memory) -> SlimMemory {
     SlimMemory {
         id: mem.id.clone(),
@@ -59,7 +56,7 @@ pub fn to_slim_memory(mem: &Memory) -> SlimMemory {
 }
 
 /// Slim view with middle-truncated user/ditto text; `max_bytes == 0` uses
-/// [`DEFAULT_FETCH_MAX_BYTES`] (Go: `ToSlimMemoryTruncated`).
+/// [`DEFAULT_FETCH_MAX_BYTES`].
 pub fn to_slim_memory_truncated(mem: &Memory, max_bytes: usize) -> SlimMemory {
     let max_bytes = if max_bytes == 0 {
         DEFAULT_FETCH_MAX_BYTES
@@ -80,7 +77,7 @@ pub fn to_slim_memory_truncated(mem: &Memory, max_bytes: usize) -> SlimMemory {
 
 /// Preview-only slim view: `preview` is the truncated summary when present,
 /// else a "User: ...\n\nDitto: ..." conversation preview; `preview_len == 0`
-/// uses [`DEFAULT_PREVIEW_LEN`] (Go: `ToSlimMemoryPreview`).
+/// uses [`DEFAULT_PREVIEW_LEN`].
 pub fn to_slim_memory_preview(mem: &Memory, preview_len: usize) -> SlimMemory {
     let preview_len = if preview_len == 0 {
         DEFAULT_PREVIEW_LEN
@@ -103,7 +100,7 @@ pub fn to_slim_memory_preview(mem: &Memory, preview_len: usize) -> SlimMemory {
     out
 }
 
-/// Maps memories to previews (Go: `SlimPreviews`).
+/// Maps memories to previews.
 pub fn slim_previews(memories: &[Memory], preview_len: usize) -> Vec<SlimMemory> {
     memories
         .iter()
@@ -111,7 +108,7 @@ pub fn slim_previews(memories: &[Memory], preview_len: usize) -> Vec<SlimMemory>
         .collect()
 }
 
-/// Maps memories to truncated slim views (Go: `SlimTruncated`).
+/// Maps memories to truncated slim views.
 pub fn slim_truncated(memories: &[Memory], max_bytes: usize) -> Vec<SlimMemory> {
     memories
         .iter()
@@ -119,8 +116,7 @@ pub fn slim_truncated(memories: &[Memory], max_bytes: usize) -> Vec<SlimMemory> 
         .collect()
 }
 
-/// First text content part of `input`, falling back to `prompt`
-/// (Go: `UserTextPrompt`).
+/// First text content part of `input`, falling back to `prompt`.
 pub fn user_text_prompt(mem: &Memory) -> String {
     for content in &mem.input {
         if content.content_type == Some(ContentType::Text) {
@@ -131,7 +127,7 @@ pub fn user_text_prompt(mem: &Memory) -> String {
 }
 
 /// All text content parts of `output` joined with newlines, falling back to
-/// `response` (Go: `AssistantTextResponse`).
+/// `response`.
 pub fn assistant_text_response(mem: &Memory) -> String {
     let parts: Vec<&str> = mem
         .output
@@ -145,14 +141,14 @@ pub fn assistant_text_response(mem: &Memory) -> String {
     mem.response.clone()
 }
 
-/// "User: ...\n\nDitto: ..." rendering of the full conversation text
-/// (Go: `FullTextContent`); degrades gracefully when one side is empty.
+/// "User: ...\n\nDitto: ..." rendering of the full conversation text;
+/// degrades gracefully when one side is empty.
 pub fn full_text_content(mem: &Memory) -> String {
     format_conversation(&user_text_prompt(mem), &assistant_text_response(mem))
 }
 
 /// Conversation preview with each side middle-truncated to `max_len / 2`
-/// bytes (Go: `ConversationTextPreview`); empty when `max_len == 0`.
+/// bytes; empty when `max_len == 0`.
 pub fn conversation_text_preview(mem: &Memory, max_len: usize) -> String {
     if max_len == 0 {
         return String::new();
@@ -172,9 +168,8 @@ fn format_conversation(user_text: &str, assistant_text: &str) -> String {
 }
 
 /// Approximate rendered character length: user text bytes + assistant text
-/// bytes + `len("User: \n\nDitto: ")` formatting overhead
-/// (Go: `ComputeCharLength`; falls back to prompt/response lengths when
-/// input/output are empty).
+/// bytes + `len("User: \n\nDitto: ")` formatting overhead (falls back to
+/// prompt/response lengths when input/output are empty).
 pub fn compute_char_length(mem: &Memory) -> i64 {
     const FORMATTING_OVERHEAD: usize = "User: \n\nDitto: ".len();
     let mut user_len: usize = mem
@@ -199,8 +194,7 @@ pub fn compute_char_length(mem: &Memory) -> i64 {
 }
 
 /// RFC3339 UTC timestamp, or empty string for the zero/unix-epoch timestamp
-/// (Go: `FormatMemoryTimestamp`; Go's zero time maps to Rust's
-/// `DateTime::<Utc>::UNIX_EPOCH` default).
+/// (`DateTime::<Utc>::UNIX_EPOCH`, the `Memory` default).
 pub fn format_memory_timestamp(mem: &Memory) -> String {
     if mem.timestamp == DateTime::<Utc>::UNIX_EPOCH {
         return String::new();
@@ -209,8 +203,8 @@ pub fn format_memory_timestamp(mem: &Memory) -> String {
 }
 
 /// Truncates to at most `max_bytes` bytes on a valid UTF-8 boundary,
-/// appending `suffix` when truncation occurs (Go: `TruncateUTF8`).
-/// `max_bytes == 0` disables truncation (Go: `maxBytes <= 0`).
+/// appending `suffix` when truncation occurs.
+/// `max_bytes == 0` disables truncation.
 pub fn truncate_utf8(s: &str, max_bytes: usize, suffix: &str) -> String {
     if max_bytes == 0 || s.len() <= max_bytes {
         return s.to_string();
@@ -225,8 +219,7 @@ pub fn truncate_utf8(s: &str, max_bytes: usize, suffix: &str) -> String {
 }
 
 /// Keeps the head and tail of `s` within `max_bytes` bytes, joining with
-/// `"\n...[truncated]...\n"` (Go: `MiddleTruncateUTF8`). `max_bytes == 0`
-/// disables truncation.
+/// `"\n...[truncated]...\n"`. `max_bytes == 0` disables truncation.
 pub fn middle_truncate_utf8(s: &str, max_bytes: usize) -> String {
     if max_bytes == 0 || s.len() <= max_bytes {
         return s.to_string();
@@ -242,8 +235,7 @@ pub fn middle_truncate_utf8(s: &str, max_bytes: usize) -> String {
     format!("{prefix}{MIDDLE_TRUNCATION_MARKER}{suffix}")
 }
 
-/// Largest prefix of `s` at most `max_bytes` long ending on a char boundary
-/// (Go: `trimToValidUTF8(s[:limit])`).
+/// Largest prefix of `s` at most `max_bytes` long ending on a char boundary.
 fn slice_to_boundary(s: &str, max_bytes: usize) -> &str {
     if max_bytes >= s.len() {
         return s;
@@ -255,8 +247,7 @@ fn slice_to_boundary(s: &str, max_bytes: usize) -> &str {
     &s[..end]
 }
 
-/// Suffix of `s` starting at or after byte `start`, on a char boundary
-/// (Go: `trimLeadingToValidUTF8(s[start:])`).
+/// Suffix of `s` starting at or after byte `start`, on a char boundary.
 fn slice_from_boundary(s: &str, start: usize) -> &str {
     if start >= s.len() {
         return "";
