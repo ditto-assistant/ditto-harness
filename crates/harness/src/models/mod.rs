@@ -66,6 +66,12 @@ pub enum ChatModelConfig {
 pub struct ModelParams {
     pub temperature: Option<f64>,
     pub max_tokens: Option<u64>,
+    /// Forwarded to the provider as the request `seed` (top-level, via rig's
+    /// flattened additional_params). It reaches the provider, but on batched
+    /// MoE backends (measured on OpenRouter and Chutes qwen3-32b) it does NOT
+    /// yield run-to-run reproducibility even at temperature 0, so it is a
+    /// best-effort hint, not a determinism guarantee. `None` omits it.
+    pub seed: Option<u64>,
 }
 
 impl ChatModelConfig {
@@ -193,7 +199,7 @@ where
             temperature: self.params.temperature,
             max_tokens: self.params.max_tokens,
             tool_choice: None,
-            additional_params: None,
+            additional_params: self.params.seed.map(|s| json!({ "seed": s })),
             output_schema: None,
         };
         let response = self
