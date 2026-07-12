@@ -19,13 +19,13 @@ cargo test
 
 The workspace crates live at:
 
-- `crates/harness` — the library
-- `crates/cli` — the command-line interface
-- `crates/node` — Node.js NAPI bindings
+- `crates/harness`: the library
+- `crates/cli`: the command-line interface
+- `crates/node`: Node.js NAPI bindings
 
 Some integration tests (the Ollama-backed tests, gated behind
 `DITTO_HARNESS_OLLAMA=1`) skip automatically when the gating environment
-variable is unset — see "Verifying locally" below.
+variable is unset; see "Verifying locally" below.
 
 ---
 
