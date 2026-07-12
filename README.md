@@ -22,7 +22,7 @@ vLLM, Chutes), and ships with Node.js bindings via `napi-rs`.
   save), `memory::Store` (ingest, vector + composite search, subjects),
   `retrieval` (composite V1/V2 scoring, the learned-weight `MlpPredictor`,
   and an optional second-stage `Reranker` hook), `models` (Ollama plus
-  OpenAI-compatible endpoints — OpenRouter, vLLM, Chutes — via `rig-core`),
+  OpenAI-compatible endpoints: OpenRouter, vLLM, Chutes, via `rig-core`),
   and `db` (embedded Turso schema + queries).
 - `crates/cli`: a command-line interface over the library.
 - `crates/node`: NAPI bindings for embedding in Node.js applications.
