@@ -13,17 +13,17 @@ service can store or bill for it separately.
 
 This repository is a Rust workspace. The implementation is backed by
 embedded Turso/SQLite with native vector search, uses `rig-core` for
-model/embedder clients (Ollama, OpenRouter, vLLM), and ships with Node.js
-bindings via `napi-rs`.
+model/embedder clients (Ollama plus any OpenAI-compatible endpoint: OpenRouter,
+vLLM, Chutes), and ships with Node.js bindings via `napi-rs`.
 
 ### Crates
 
 - `crates/harness`: the library. `chat::Harness` (prepare → agent loop →
   save), `memory::Store` (ingest, vector + composite search, subjects),
   `retrieval` (composite V1/V2 scoring, the learned-weight `MlpPredictor`,
-  and an optional second-stage `Reranker` hook), `models` (Ollama /
-  OpenRouter / vLLM via `rig-core`), and `db` (embedded Turso schema +
-  queries).
+  and an optional second-stage `Reranker` hook), `models` (Ollama plus
+  OpenAI-compatible endpoints — OpenRouter, vLLM, Chutes — via `rig-core`),
+  and `db` (embedded Turso schema + queries).
 - `crates/cli`: a command-line interface over the library.
 - `crates/node`: NAPI bindings for embedding in Node.js applications.
 
