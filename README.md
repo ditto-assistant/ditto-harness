@@ -5,6 +5,18 @@ Ditto backend. It is intentionally smaller than the production backend: it
 stores and retrieves agent memories, exposes those memories as tools, and
 provides an importable agent loop with extension points for host applications.
 
+## Mining SN118? Use the starter kit, not this repo
+
+You do not edit this repository to mine. This is the generic memory and agent
+library, the engine your submission depends on. It knows nothing about the
+benchmark, the validator, or scoring. Miners build and submit
+[`dittobench-starter-kit`](https://github.com/ditto-assistant/dittobench-starter-kit),
+which wires this library into a scored agent and is the crate you edit and
+submit. The kit pins this repo as a build dependency, and you tune the engine
+from the kit (prompt, reranker, ranking weights, retrieval config) without
+changing this repo. You only fork this repo to edit the built-in ranking
+pipeline in place, which the kit can otherwise override or bypass.
+
 The harness does not persist billing receipts or closed-source Ditto
 application features. It does expose usage and cost data so an importing
 service can store or bill for it separately.
@@ -19,11 +31,11 @@ vLLM, Chutes), and ships with Node.js bindings via `napi-rs`.
 ### Crates
 
 - `crates/harness`: the library. `chat::Harness` (prepare → agent loop →
-  save), `memory::Store` (ingest, vector + composite search, subjects),
-  `retrieval` (composite V1/V2 scoring, the learned-weight `MlpPredictor`,
-  and an optional second-stage `Reranker` hook), `models` (Ollama plus
-  OpenAI-compatible endpoints: OpenRouter, vLLM, Chutes, via `rig-core`),
-  and `db` (embedded Turso schema + queries).
+save), `memory::Store` (ingest, vector + composite search, subjects),
+`retrieval` (composite V1/V2 scoring, the learned-weight `MlpPredictor`,
+and an optional second-stage `Reranker` hook), `models` (Ollama plus
+OpenAI-compatible endpoints: OpenRouter, vLLM, Chutes, via `rig-core`),
+and `db` (embedded Turso schema + queries).
 - `crates/cli`: a command-line interface over the library.
 - `crates/node`: NAPI bindings for embedding in Node.js applications.
 
@@ -40,6 +52,8 @@ reproducible builds):
 ditto-harness = { git = "https://github.com/ditto-assistant/ditto-harness", rev = "<main-commit>" }
 ```
 
+
+
 ## Architecture
 
 The crate serves a chat turn and ingests memories into the subject graph.
@@ -47,29 +61,31 @@ The crate serves a chat turn and ingests memories into the subject graph.
 ### Chat turn (`chat::Harness::run`)
 
 1. `prepare`: normalize messages (system prompt first; `user_input` seeds
-   the first user message when the history has no non-system messages),
+  the first user message when the history has no non-system messages),
    resolve ids (empty `kg_id` derives from the user id, empty `session_id`
    becomes "main"), run memory retrieval via `Store::get_prompt_memories`,
    and insert the memory-context system message after the leading system
    block.
 2. `agent::Loop::run_streaming`: up to `max_turns` model turns; each turn
-   either ends the run with final text or dispatches one tool call. Repeated
+  either ends the run with final text or dispatches one tool call. Repeated
    identical tool calls trip loop detection, which substitutes a canned tool
    result and a synthesis prompt. `agent::EventHandler` observes each step.
 3. Optional save: with `save_memory`, the final exchange is persisted via
-   `Store::save_memory`, carrying the seed-memory and retrieval metadata from
+  `Store::save_memory`, carrying the seed-memory and retrieval metadata from
    preparation.
+
+
 
 ### Ingest (`seed`, then `dream`)
 
 1. `Store::save_memory`: embeds `prompt\nresponse\nsummary` as one text,
-   upserts the pair, and embeds/upserts/links any provided subjects.
+  upserts the pair, and embeds/upserts/links any provided subjects.
 2. `dream::Dreamer::dream`: extract durable subjects per memory pair (the
-   only LLM stage), dedup against existing subject embeddings (merge at
+  only LLM stage), dedup against existing subject embeddings (merge at
    cosine >= `SUBJECT_MERGE_THRESHOLD`), link subjects to pairs, and refine
    merge-accumulated subjects.
 3. The resulting subject graph feeds composite retrieval's
-   subject-frequency, subject-semantic-match, and neighbor-density signals.
+  subject-frequency, subject-semantic-match, and neighbor-density signals.
 
 Retrieval mode is selected by `chat::PrepareRequest::use_composite`, which
 defaults to false. When false, long-term retrieval is plain vector search
@@ -83,11 +99,13 @@ Extension points (trait -> what you replace):
 
 - `types::Embedder`: the embedding backend (768-dim contract; see its docs).
 - `retrieval::WeightPredictor`: per-query fusion weights; `MlpPredictor` is
-  the loadable learned implementation.
+the loadable learned implementation.
 - `retrieval::Reranker`: optional second-stage rerank over the composite
-  pool.
+pool.
 - `types::Model`: the chat model driving the agent loop.
 - `agent::EventHandler`: streaming observer for loop events.
+
+
 
 ## CLI quickstart
 
@@ -211,6 +229,6 @@ dependency does not trip it. The miner-facing details live in the
 
 ## License
 
-ditto-harness is licensed under the MIT License; see [`LICENSE`](LICENSE).
+ditto-harness is licensed under the MIT License; see `[LICENSE](LICENSE)`.
 The license permits use in closed-source and hosted products. Contributions
 are accepted under the same terms (see [CONTRIBUTING.md](CONTRIBUTING.md)).
