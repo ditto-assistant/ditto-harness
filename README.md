@@ -5,7 +5,7 @@ Ditto backend. It is intentionally smaller than the production backend: it
 stores and retrieves agent memories, exposes those memories as tools, and
 provides an importable agent loop with extension points for host applications.
 
-## Mining SN118? Use the starter kit, not this repo
+## Mining SN118 (Bittensor subnet 118)? Use the starter kit, not this repo
 
 You do not edit this repository to mine. This is the generic memory and agent
 library, the engine your submission depends on. It knows nothing about the
@@ -62,8 +62,9 @@ The crate serves a chat turn and ingests memories into the subject graph.
 
 1. `prepare`: normalize messages (system prompt first; `user_input` seeds
   the first user message when the history has no non-system messages),
-   resolve ids (empty `kg_id` derives from the user id, empty `session_id`
-   becomes "main"), run memory retrieval via `Store::get_prompt_memories`,
+   resolve ids (empty `kg_id`, the knowledge-graph id, derives from the user id,
+   empty `session_id` becomes "main"), run memory retrieval via
+   `Store::get_prompt_memories`,
    and insert the memory-context system message after the leading system
    block.
 2. `agent::Loop::run_streaming`: up to `max_turns` model turns; each turn
