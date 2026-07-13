@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //! Model and embedder providers: Ollama plus OpenAI-compatible endpoints
-//! (vLLM, OpenRouter), bridged to the [`Model`]/[`Embedder`] traits via
+//! (vLLM, OpenRouter, Chutes), bridged to the [`Model`]/[`Embedder`] traits via
 //! rig-core.
 //!
 //! The bridge sits on rig's low-level `CompletionModel` trait (not its typed
@@ -44,7 +44,7 @@ pub const DEFAULT_EMBED_MODEL: &str = "embeddinggemma";
 pub const DEFAULT_EMBED_DIMS: usize = 768;
 
 /// Chat model configuration covering Ollama and OpenAI-compatible servers
-/// (vLLM, OpenRouter).
+/// (vLLM, OpenRouter, Chutes).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatModelConfig {
     Ollama {

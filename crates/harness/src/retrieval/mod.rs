@@ -203,8 +203,8 @@ pub struct Features {
     #[serde(skip)]
     pub query_embedding: Vec<f32>,
     // `short_term_memory_count`, `candidate_memory_count`, `embedding_norm`,
-    // and `host_application_signal` are reserved for training-log schema
-    // parity; no caller in this crate populates them yet.
+    // and `host_application_signal` exist for training-log schema parity only;
+    // no caller in this crate populates them, by design.
     #[serde(default, skip_serializing_if = "crate::types::is_zero_i64")]
     pub short_term_memory_count: i64,
     #[serde(default, skip_serializing_if = "crate::types::is_zero_i64")]
