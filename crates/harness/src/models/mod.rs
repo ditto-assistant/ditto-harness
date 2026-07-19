@@ -22,7 +22,9 @@ use rig_core::message::{
     ToolFunction as RigToolFunction, ToolResult as RigToolResult,
     ToolResultContent as RigToolResultContent, UserContent as RigUserContent,
 };
-use rig_core::providers::{ollama as rig_ollama, openai as rig_openai};
+use rig_core::providers::{
+    ollama as rig_ollama, openai as rig_openai, openrouter as rig_openrouter,
+};
 use rig_core::OneOrMany;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -36,6 +38,10 @@ use crate::types::{
 pub const DEFAULT_OLLAMA_BASE_URL: &str = "http://localhost:11434";
 /// OpenRouter OpenAI-compatible endpoint.
 pub const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
+/// Ditto identity required by OpenRouter's app-attribution contract.
+pub const OPENROUTER_APP_REFERER: &str = "https://heyditto.ai";
+/// Ditto display name required by OpenRouter's app-attribution contract.
+pub const OPENROUTER_APP_TITLE: &str = "Ditto";
 /// Default local chat model for the dream pipeline.
 pub const DEFAULT_OLLAMA_CHAT_MODEL: &str = "gemma3:4b";
 /// Default embedding model (768 dims).
@@ -149,27 +155,57 @@ impl ChatModelConfig {
                         "openai-compatible model name required".into(),
                     ));
                 }
+                if is_openrouter_base_url(base_url) {
+                    let client = build_openrouter_client(api_key, base_url)?;
+                    return Ok(Arc::new(RigModel {
+                        inner: client.completion_model(model.clone()),
+                        provider: "openrouter".to_string(),
+                        model: model.clone(),
+                        params,
+                    }));
+                }
                 let client = rig_openai::CompletionsClient::builder()
                     .api_key::<BearerAuth>(api_key.clone())
                     .base_url(base_url)
                     .build()
                     .map_err(|err| Error::Model(format!("openai-compatible client: {err}")))?;
-                let provider = if base_url.trim_end_matches('/')
-                    == OPENROUTER_BASE_URL.trim_end_matches('/')
-                {
-                    "openrouter"
-                } else {
-                    "openai-compat"
-                };
                 Ok(Arc::new(RigModel {
                     inner: client.completion_model(model.clone()),
-                    provider: provider.to_string(),
+                    provider: "openai-compat".to_string(),
                     model: model.clone(),
                     params,
                 }))
             }
         }
     }
+}
+
+fn is_openrouter_base_url(base_url: &str) -> bool {
+    let authority = base_url
+        .split_once("://")
+        .map_or(base_url, |(_, rest)| rest)
+        .split('/')
+        .next()
+        .unwrap_or_default();
+    let host = authority
+        .rsplit('@')
+        .next()
+        .unwrap_or_default()
+        .split(':')
+        .next()
+        .unwrap_or_default();
+    host == "openrouter.ai" || host.ends_with(".openrouter.ai")
+}
+
+// Use rig's OpenRouter client so both attribution headers are attached to all
+// completion requests, including provider retries and streamed requests.
+fn build_openrouter_client(api_key: &str, base_url: &str) -> Result<rig_openrouter::Client> {
+    rig_openrouter::Client::builder()
+        .with_app_identity(OPENROUTER_APP_TITLE, OPENROUTER_APP_REFERER)
+        .api_key::<BearerAuth>(api_key.to_string())
+        .base_url(base_url)
+        .build()
+        .map_err(|err| Error::Model(format!("openrouter client: {err}")))
 }
 
 /// Bridge from rig's low-level `CompletionModel` to the harness [`Model`]
@@ -579,6 +615,30 @@ mod tests {
             ChatModelConfig::vllm("", "qwen").build(),
             Err(Error::InvalidArgument(_))
         ));
+    }
+
+    #[test]
+    fn openrouter_client_has_app_attribution_headers() {
+        let client = build_openrouter_client("test-key", OPENROUTER_BASE_URL)
+            .expect("openrouter client builds");
+        assert_eq!(
+            client.headers().get("http-referer").unwrap(),
+            OPENROUTER_APP_REFERER
+        );
+        assert_eq!(
+            client.headers().get("x-openrouter-title").unwrap(),
+            OPENROUTER_APP_TITLE
+        );
+    }
+
+    #[test]
+    fn recognizes_default_and_regional_openrouter_hosts() {
+        assert!(is_openrouter_base_url(OPENROUTER_BASE_URL));
+        assert!(is_openrouter_base_url("https://eu.openrouter.ai/api/v1/"));
+        assert!(!is_openrouter_base_url(
+            "https://openrouter.ai.example/api/v1"
+        ));
+        assert!(!is_openrouter_base_url("http://localhost:8000/v1"));
     }
 
     #[test]

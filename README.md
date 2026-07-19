@@ -1,5 +1,8 @@
 # Ditto Harness
 
+OpenRouter-backed models send `HTTP-Referer: https://heyditto.ai` and
+`X-OpenRouter-Title: Ditto` according to OpenRouter's app-attribution contract.
+
 The memory and agent harness extracted from the
 Ditto backend. It is intentionally smaller than the production backend: it
 stores and retrieves agent memories, exposes those memories as tools, and
