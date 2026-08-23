@@ -64,7 +64,7 @@ struct SubjectLine {
 /// Lists every subject for the user with its link count (most-linked first).
 async fn list_subjects(db: &Db, user_id: &str) -> anyhow::Result<Vec<SubjectLine>> {
     let mut rows = db
-        .connection()
+        .connection()?
         .query(
             "SELECT s.subject_text, COALESCE(s.description_text, ''), s.is_key_subject,
                     COUNT(l.pair_id) AS links

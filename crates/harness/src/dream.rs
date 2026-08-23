@@ -333,7 +333,7 @@ impl Dreamer {
                     } else {
                         format!("{}{MERGE_SEPARATOR}{}", entry.description, desc)
                     };
-                    db.connection()
+                    db.connection()?
                         .execute(
                             "UPDATE subjects SET description_text = ?, updated_at = ? WHERE id = ?",
                             (
@@ -352,7 +352,7 @@ impl Dreamer {
         // Insert; UNIQUE(user_id, kg_id, subject_text) backstops exact dups.
         let new_id = db::new_row_id();
         let mut rows = db
-            .connection()
+            .connection()?
             .query(
                 "INSERT INTO subjects (id, user_id, kg_id, subject_text, description_text, is_key_subject, embedding, updated_at)
                  VALUES (?, ?, ?, ?, NULLIF(?, ''), 0, ?, ?)
@@ -405,7 +405,7 @@ impl Dreamer {
     ) -> Result<usize> {
         let mut candidates: Vec<(String, String, String)> = Vec::new();
         let mut rows = db
-            .connection()
+            .connection()?
             .query(
                 "SELECT id, subject_text, description_text FROM subjects
                  WHERE user_id = ? AND kg_id = ? AND description_text LIKE '%' || ? || '%'",
@@ -456,7 +456,7 @@ impl Dreamer {
             // subject_text); on collision keep the old name.
             if name != *old_name {
                 let mut taken = db
-                    .connection()
+                    .connection()?
                     .query(
                         "SELECT id FROM subjects WHERE user_id = ? AND kg_id = ? AND subject_text = ? AND id != ?",
                         (
@@ -492,7 +492,7 @@ impl Dreamer {
                 continue;
             };
 
-            db.connection()
+            db.connection()?
                 .execute(
                     "UPDATE subjects SET subject_text = ?, description_text = ?, embedding = ?, updated_at = ? WHERE id = ?",
                     vec![
@@ -518,7 +518,7 @@ async fn load_recent_pairs(
     limit: usize,
 ) -> Result<Vec<PairLite>> {
     let mut rows = db
-        .connection()
+        .connection()?
         .query(
             "SELECT id, prompt, response, input, output, description FROM memory_pairs
              WHERE user_id = ? AND kg_id = ?
@@ -562,7 +562,7 @@ async fn load_recent_pairs(
 /// Loads the user's existing subjects for cosine dedup.
 async fn load_subject_entries(db: &Db, user_id: &str, kg_id: &str) -> Result<Vec<SubjectEntry>> {
     let mut rows = db
-        .connection()
+        .connection()?
         .query(
             "SELECT id, subject_text, description_text, embedding FROM subjects
              WHERE user_id = ? AND kg_id = ?",
@@ -589,7 +589,7 @@ async fn load_subject_entries(db: &Db, user_id: &str, kg_id: &str) -> Result<Vec
 
 /// Writes the extraction summary onto a pair that has no description yet.
 async fn write_pair_summary(db: &Db, pair_id: &str, summary: &str) -> Result<()> {
-    db.connection()
+    db.connection()?
         .execute(
             "UPDATE memory_pairs SET description = ?, updated_at = ?
              WHERE id = ? AND (description IS NULL OR description = '')",
@@ -613,7 +613,7 @@ async fn link_subject_pair(
     kg_id: &str,
 ) -> Result<bool> {
     let affected = db
-        .connection()
+        .connection()?
         .execute(
             "INSERT INTO subject_memory_pair_links (subject_id, pair_id, user_id, kg_id)
              VALUES (?, ?, ?, ?)
@@ -631,7 +631,7 @@ async fn link_subject_pair(
 
 /// Flips `is_key_subject` on once a subject has a linked pair.
 async fn mark_key_subject(db: &Db, subject_id: &str) -> Result<()> {
-    db.connection()
+    db.connection()?
         .execute(
             "UPDATE subjects SET is_key_subject = 1 WHERE id = ? AND is_key_subject = 0",
             (turso::Value::Text(subject_id.to_string()),),
@@ -887,6 +887,7 @@ mod tests {
 
     async fn seed_pair(db: &Db, user_id: &str, kg: &str, n: i64, prompt: &str, response: &str) {
         db.connection()
+            .expect("connect")
             .execute(
                 "INSERT OR IGNORE INTO harness_users (uid) VALUES (?)",
                 (turso::Value::Text(user_id.to_string()),),
@@ -894,6 +895,7 @@ mod tests {
             .await
             .expect("seed user");
         db.connection()
+            .expect("connect")
             .execute(
                 "INSERT INTO memory_pairs (id, firestore_pair_id, user_id, kg_id, prompt, response, timestamp)
                  VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -933,7 +935,12 @@ mod tests {
     }
 
     async fn count(db: &Db, sql: &str) -> i64 {
-        let mut rows = db.connection().query(sql, ()).await.expect("count query");
+        let mut rows = db
+            .connection()
+            .expect("connect")
+            .query(sql, ())
+            .await
+            .expect("count query");
         match rows
             .next()
             .await
@@ -1185,6 +1192,7 @@ mod tests {
         assert_eq!(count(&db, "SELECT COUNT(*) FROM subjects").await, 1);
         let mut rows = db
             .connection()
+            .expect("connect")
             .query("SELECT subject_text, description_text FROM subjects", ())
             .await
             .expect("select subject");

@@ -452,7 +452,7 @@ async fn fetch_candidates(
     args.push(turso::Value::Blob(blob.to_vec()));
     args.push(turso::Value::Integer(params.candidate_pool_size as i64));
 
-    let mut rows = db.connection().query(&sql, args).await?;
+    let mut rows = db.connection()?.query(&sql, args).await?;
     let mut candidates: Vec<Candidate> = Vec::new();
     while let Some(row) = rows.next().await? {
         candidates.push(Candidate {
@@ -470,7 +470,7 @@ async fn fetch_candidates(
 /// candidate_subjects) plus the per-subject global link counts. `IN` lists
 /// are chunked ([`IN_CLAUSE_CHUNK_SIZE`]) and the results merged.
 async fn fetch_subject_links(db: &Db, candidates: &[Candidate]) -> Result<SubjectLinks> {
-    let conn = db.connection();
+    let conn = db.connection()?;
     let candidate_row_ids: Vec<String> = candidates.iter().map(|c| c.row_id.clone()).collect();
     let mut links = SubjectLinks::default();
     for chunk in candidate_row_ids.chunks(IN_CLAUSE_CHUNK_SIZE) {
@@ -537,7 +537,7 @@ async fn v2_aggregates(db: &Db, blob: &[u8], links: &SubjectLinks) -> Result<Has
         );
         let mut args = vec![turso::Value::Blob(blob.to_vec())];
         args.extend(chunk.iter().map(|id| turso::Value::Text((*id).clone())));
-        let mut rows = db.connection().query(&sql, args).await?;
+        let mut rows = db.connection()?.query(&sql, args).await?;
         while let Some(row) = rows.next().await? {
             subject_sem.insert(get_text(&row, 0)?, get_f64(&row, 1)?);
         }
@@ -719,7 +719,7 @@ pub async fn log_event(db: &Db, event: RetrievalEvent) -> Result<()> {
     } else {
         turso::Value::Blob(crate::db::encode_f32_blob(&event.query_embedding))
     };
-    db.connection()
+    db.connection()?
         .execute(
             "INSERT INTO retrieval_events (
                 user_id, kg_id, session_id, request_path, query,
@@ -1187,6 +1187,7 @@ mod tests {
 
         let mut rows = db
             .connection()
+            .expect("connect")
             .query(
                 "SELECT user_id, request_path, retrieved_pair_ids, weights, aux_features,
                         query_embedding IS NOT NULL
@@ -1235,6 +1236,7 @@ mod tests {
         .expect("log event");
         let mut rows = db
             .connection()
+            .expect("connect")
             .query(
                 "SELECT query_embedding IS NULL, retrieved_pair_ids, weights FROM retrieval_events",
                 (),

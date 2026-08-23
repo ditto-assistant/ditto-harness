@@ -117,12 +117,15 @@ pub const SCHEMA_STATEMENTS: &[&str] = &[
 ];
 
 /// Handle to a Turso database with the harness schema applied.
+///
+/// Turso's engine allows concurrent connections to one `Database`. A single
+/// `turso::Connection` does not: overlapping `query`/`execute` returns
+/// `concurrent use forbidden`. Cloning a connection shares the same inner
+/// handle. Overlapping `/run` and parallel tool calls must each call
+/// [`Db::connection`] so they get a dedicated connection.
 #[derive(Clone)]
 pub struct Db {
-    /// Never read directly, but held so the database outlives `conn`.
-    #[allow(dead_code)]
     database: turso::Database,
-    conn: turso::Connection,
 }
 
 impl Db {
@@ -139,28 +142,31 @@ impl Db {
     }
 
     async fn from_database(database: turso::Database) -> Result<Db> {
-        let conn = database.connect()?;
-        let db = Db { database, conn };
+        let db = Db { database };
         db.migrate().await?;
         Ok(db)
     }
 
     /// Applies the schema idempotently. Safe to call on every open.
     pub async fn migrate(&self) -> Result<()> {
+        let conn = self.connection()?;
         for stmt in SCHEMA_STATEMENTS {
-            self.conn.execute(stmt, ()).await?;
+            conn.execute(stmt, ()).await?;
         }
         Ok(())
     }
 
-    /// Raw connection access for modules that run bespoke SQL.
-    pub fn connection(&self) -> &turso::Connection {
-        &self.conn
+    /// Opens a dedicated Turso connection to this database.
+    ///
+    /// Do not clone the returned connection for overlapping work; call this
+    /// again instead.
+    pub fn connection(&self) -> Result<turso::Connection> {
+        Ok(self.database.connect()?)
     }
 
     /// Inserts the uid, ignoring conflicts.
     pub async fn upsert_user(&self, uid: &str) -> Result<()> {
-        self.conn
+        self.connection()?
             .execute(
                 "INSERT INTO harness_users (uid) VALUES (?) ON CONFLICT (uid) DO NOTHING",
                 (turso::Value::Text(uid.to_string()),),
@@ -224,7 +230,7 @@ impl Db {
             embedding_or_null(params.conversation_embedding.as_deref())?,
             turso::Value::Text(format_timestamp(chrono::Utc::now())),
         ];
-        let mut rows = self.conn.query(&sql, args).await?;
+        let mut rows = self.connection()?.query(&sql, args).await?;
         match rows.next().await? {
             Some(row) => decode_memory_pair_row(&row, false),
             None => Err(Error::Other(
@@ -256,7 +262,7 @@ impl Db {
             embedding_or_null(params.embedding.as_deref())?,
             turso::Value::Text(format_timestamp(chrono::Utc::now())),
         ];
-        let mut rows = self.conn.query(sql, args).await?;
+        let mut rows = self.connection()?.query(sql, args).await?;
         match rows.next().await? {
             Some(row) => decode_subject_row(&row, false),
             None => Err(Error::Other("upsert_subject returned no row".to_string())),
@@ -271,7 +277,7 @@ impl Db {
         user_id: &str,
         kg_id: &str,
     ) -> Result<()> {
-        self.conn
+        self.connection()?
             .execute(
                 "INSERT INTO subject_memory_pair_links (subject_id, pair_id, user_id, kg_id)
                  VALUES (?, ?, ?, ?)
@@ -310,7 +316,7 @@ impl Db {
             let mut args = Vec::with_capacity(1 + chunk.len());
             args.push(turso::Value::Text(user_id.to_string()));
             args.extend(chunk.iter().map(|id| turso::Value::Text(id.clone())));
-            let mut rows = self.conn.query(&sql, args).await?;
+            let mut rows = self.connection()?.query(&sql, args).await?;
             while let Some(row) = rows.next().await? {
                 out.push(decode_memory_pair_row(&row, false)?);
             }
@@ -356,7 +362,7 @@ impl Db {
         );
         sql.push_str(" ORDER BY timestamp DESC LIMIT ?");
         args.push(turso::Value::Integer(params.limit));
-        let mut rows = self.conn.query(&sql, args).await?;
+        let mut rows = self.connection()?.query(&sql, args).await?;
         let mut out = Vec::new();
         while let Some(row) = rows.next().await? {
             out.push(decode_memory_pair_row(&row, false)?);
@@ -401,7 +407,7 @@ impl Db {
         );
         args.push(turso::Value::Blob(blob));
         args.push(turso::Value::Integer(params.limit));
-        let mut rows = self.conn.query(&sql, args).await?;
+        let mut rows = self.connection()?.query(&sql, args).await?;
         let mut out = Vec::new();
         while let Some(row) = rows.next().await? {
             out.push(decode_memory_pair_row(&row, true)?);
@@ -435,7 +441,7 @@ impl Db {
             turso::Value::Blob(blob),
             turso::Value::Integer(params.limit),
         ];
-        let mut rows = self.conn.query(sql, args).await?;
+        let mut rows = self.connection()?.query(sql, args).await?;
         let mut out = Vec::new();
         while let Some(row) = rows.next().await? {
             out.push(decode_subject_row(&row, true)?);
@@ -470,7 +476,7 @@ impl Db {
             turso::Value::Blob(blob),
             turso::Value::Integer(params.limit),
         ];
-        let mut rows = self.conn.query(&sql, args).await?;
+        let mut rows = self.connection()?.query(&sql, args).await?;
         let mut out = Vec::new();
         while let Some(row) = rows.next().await? {
             out.push(decode_memory_pair_row(&row, true)?);
@@ -832,12 +838,10 @@ pub fn encode_f32_blob(v: &[f32]) -> Vec<u8> {
 /// Decodes a little-endian f32 blob back into an embedding. Trailing bytes
 /// that do not complete an f32 are ignored.
 pub fn decode_f32_blob(b: &[u8]) -> Vec<f32> {
-    b.chunks_exact(4)
-        .map(|chunk| {
-            let mut buf = [0u8; 4];
-            buf.copy_from_slice(chunk);
-            f32::from_le_bytes(buf)
-        })
+    b.as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
         .collect()
 }
 
@@ -963,11 +967,13 @@ mod tests {
         db.migrate().await.expect("re-run migrations");
         // created_at defaults must fire.
         db.connection()
+            .expect("connect")
             .execute("INSERT INTO harness_users (uid) VALUES ('u1')", ())
             .await
             .expect("insert user");
         let mut rows = db
             .connection()
+            .expect("connect")
             .query("SELECT created_at FROM harness_users WHERE uid = 'u1'", ())
             .await
             .expect("select");
@@ -996,6 +1002,106 @@ mod tests {
         let early = format_timestamp(parse_timestamp("2024-01-01T00:00:00Z").expect("parse"));
         let late = format_timestamp(parse_timestamp("2024-01-01T00:00:00.000001Z").expect("parse"));
         assert!(early < late, "lexicographic order must match time order");
+    }
+
+    /// Production overlapping `/run` shares one process-wide `Db`. A reader
+    /// iterating a SELECT must not collide with a writer `upsert_user`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn overlapping_db_read_and_write_do_not_hit_concurrent_use_forbidden() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("overlap.db");
+        let db = std::sync::Arc::new(
+            Db::open(path.to_str().unwrap())
+                .await
+                .expect("open file-backed db"),
+        );
+        for i in 0..64 {
+            db.upsert_user(&format!("seed-{i:02}")).await.expect("seed");
+        }
+
+        let reader = std::sync::Arc::clone(&db);
+        let writer = std::sync::Arc::clone(&db);
+        let started = std::sync::Arc::new(tokio::sync::Notify::new());
+        let started_sig = std::sync::Arc::clone(&started);
+
+        let read = tokio::spawn(async move {
+            let mut rows = reader
+                .connection()?
+                .query("SELECT uid FROM harness_users", ())
+                .await?;
+            started_sig.notify_one();
+            let mut n = 0usize;
+            while rows.next().await?.is_some() {
+                n += 1;
+            }
+            Ok::<usize, Error>(n)
+        });
+        started.notified().await;
+
+        let mut write_errors = Vec::new();
+        for i in 0..8 {
+            if let Err(err) = writer.upsert_user(&format!("writer-{i}")).await {
+                write_errors.push(err.to_string());
+            }
+        }
+        let read = read.await.expect("join");
+        assert!(
+            write_errors.is_empty(),
+            "overlapping Db writes failed: {write_errors:?}"
+        );
+        let n = read.expect("reader");
+        assert!(n >= 64, "reader saw {n} rows");
+    }
+
+    /// Eight overlapping retrievals, matching `case_concurrency = 8`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn eight_overlapping_list_recent_do_not_hit_concurrent_use_forbidden() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("overlap8.db");
+        let db = std::sync::Arc::new(
+            Db::open(path.to_str().unwrap())
+                .await
+                .expect("open file-backed db"),
+        );
+        db.upsert_user("u1").await.expect("user");
+        for i in 0..32 {
+            db.create_memory_pair(pair_params(
+                "u1",
+                &format!("pair-{i:02}"),
+                "2026-01-01T00:00:00Z",
+            ))
+            .await
+            .expect("pair");
+        }
+
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(8));
+        let mut set = tokio::task::JoinSet::new();
+        for _ in 0..8 {
+            let db = std::sync::Arc::clone(&db);
+            let barrier = std::sync::Arc::clone(&barrier);
+            set.spawn(async move {
+                barrier.wait().await;
+                db.list_recent_memories(ListRecentMemoriesParams {
+                    user_id: "u1".to_string(),
+                    kg_id: "user_memories_u1".to_string(),
+                    limit: 16,
+                    ..ListRecentMemoriesParams::default()
+                })
+                .await
+            });
+        }
+
+        let mut failed = Vec::new();
+        while let Some(joined) = set.join_next().await {
+            match joined.expect("join") {
+                Ok(rows) => assert!(!rows.is_empty(), "expected seeded pairs"),
+                Err(err) => failed.push(err.to_string()),
+            }
+        }
+        assert!(
+            failed.is_empty(),
+            "8-wide overlapping list_recent failed: {failed:?}"
+        );
     }
 
     /// 768-dim embedding with weight 1 on the given axes (only direction
