@@ -838,12 +838,10 @@ pub fn encode_f32_blob(v: &[f32]) -> Vec<u8> {
 /// Decodes a little-endian f32 blob back into an embedding. Trailing bytes
 /// that do not complete an f32 are ignored.
 pub fn decode_f32_blob(b: &[u8]) -> Vec<f32> {
-    b.chunks_exact(4)
-        .map(|chunk| {
-            let mut buf = [0u8; 4];
-            buf.copy_from_slice(chunk);
-            f32::from_le_bytes(buf)
-        })
+    b.as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
         .collect()
 }
 
