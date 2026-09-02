@@ -118,6 +118,80 @@ impl ChatModelConfig {
         self.build_with_params(ModelParams::default())
     }
 
+    /// Builds like [`ChatModelConfig::build_with_params`], additionally
+    /// attaching `extra_headers` to every request the model issues.
+    ///
+    /// Plain OpenAI-compatible endpoints only: the use case is per-request
+    /// attribution that the SN118 platform broker records verbatim (e.g.
+    /// `X-Ditto-Case-Id`, which it verifies against the cases in flight).
+    /// OpenRouter and Ollama builds reject non-empty headers rather than
+    /// silently dropping them, so a caller cannot believe attribution is
+    /// flowing when it is not. An empty slice is exactly
+    /// [`ChatModelConfig::build_with_params`] for every provider.
+    pub fn build_with_params_and_headers(
+        &self,
+        params: ModelParams,
+        extra_headers: &[(&str, &str)],
+    ) -> Result<Arc<dyn Model>> {
+        if extra_headers.is_empty() {
+            return self.build_with_params(params);
+        }
+        let ChatModelConfig::OpenAiCompat {
+            base_url,
+            api_key,
+            model,
+        } = self
+        else {
+            return Err(Error::InvalidArgument(
+                "extra headers are only supported for openai-compatible endpoints".into(),
+            ));
+        };
+        if is_openrouter_base_url(base_url) {
+            return Err(Error::InvalidArgument(
+                "extra headers are only supported for openai-compatible endpoints".into(),
+            ));
+        }
+        if base_url.is_empty() {
+            return Err(Error::InvalidArgument(
+                "openai-compatible base_url required".into(),
+            ));
+        }
+        if model.is_empty() {
+            return Err(Error::InvalidArgument(
+                "openai-compatible model name required".into(),
+            ));
+        }
+        // rig bundles its own reqwest (0.13); the workspace one (0.12) is a
+        // different crate and does not satisfy rig's `HttpClientExt`. Build
+        // the headered client through rig's re-export so the versions agree.
+        let mut headers = rig_core::http_client::HeaderMap::new();
+        for (name, value) in extra_headers {
+            let header_name = http::HeaderName::from_bytes(name.as_bytes())
+                .map_err(|err| Error::InvalidArgument(format!("header name {name:?}: {err}")))?;
+            let header_value =
+                rig_core::http_client::HeaderValue::from_str(value).map_err(|err| {
+                    Error::InvalidArgument(format!("value for header {name:?}: {err}"))
+                })?;
+            headers.insert(header_name, header_value);
+        }
+        let http = rig_core::http_client::ReqwestClient::builder()
+            .default_headers(headers)
+            .build()
+            .map_err(|err| Error::Model(format!("http client: {err}")))?;
+        let client = rig_openai::CompletionsClient::builder()
+            .api_key::<BearerAuth>(api_key.clone())
+            .base_url(base_url)
+            .http_client(http)
+            .build()
+            .map_err(|err| Error::Model(format!("openai-compatible client: {err}")))?;
+        Ok(Arc::new(RigModel {
+            inner: client.completion_model(model.clone()),
+            provider: "openai-compat".to_string(),
+            model: model.clone(),
+            params,
+        }))
+    }
+
     /// Builds a [`Model`] backed by rig-core for this configuration. The
     /// returned model maps `ChatMessage`/`ToolDefinition` to the provider
     /// request, and provider tool calls / text / usage back into a
@@ -559,6 +633,114 @@ mod tests {
             content: vec![Content::text(text)],
             ..ChatMessage::default()
         }
+    }
+
+    /// One-shot OpenAI-compatible stub: accepts a single connection, replies
+    /// with a canned `chat.completion`, and reports the value of
+    /// `x-ditto-case-id` it saw (None when the header never arrived).
+    async fn one_shot_openai_stub() -> (String, tokio::sync::oneshot::Receiver<Option<String>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 4096];
+            let header_end = loop {
+                let n = sock.read(&mut chunk).await.unwrap();
+                if n == 0 {
+                    break buf.len();
+                }
+                buf.extend_from_slice(&chunk[..n]);
+                if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break pos + 4;
+                }
+            };
+            let head = String::from_utf8_lossy(&buf[..header_end]).to_string();
+            let content_length = head
+                .lines()
+                .find_map(|l| {
+                    let (name, value) = l.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())?
+                })
+                .unwrap_or(0);
+            while buf.len() < header_end + content_length {
+                let n = sock.read(&mut chunk).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+            }
+            let case = head.lines().find_map(|l| {
+                let (name, value) = l.split_once(':')?;
+                name.eq_ignore_ascii_case("x-ditto-case-id")
+                    .then(|| value.trim().to_string())
+            });
+            let body = serde_json::json!({
+                "id": "cmpl-stub", "object": "chat.completion", "created": 0,
+                "model": "stub-model",
+                "choices": [{"index": 0, "finish_reason": "stop",
+                             "message": {"role": "assistant", "content": "ok"}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+            })
+            .to_string();
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            sock.write_all(resp.as_bytes()).await.unwrap();
+            let _ = sock.shutdown().await;
+            let _ = tx.send(case);
+        });
+        (base_url, rx)
+    }
+
+    #[tokio::test]
+    async fn extra_headers_reach_the_wire() {
+        let (base_url, saw) = one_shot_openai_stub().await;
+        let model = ChatModelConfig::vllm(base_url, "stub-model")
+            .build_with_params_and_headers(
+                ModelParams::default(),
+                &[("X-Ditto-Case-Id", "case-123")],
+            )
+            .expect("build headered model");
+        let chunk = model.next(&[user("hi")], &[]).await.expect("chat call");
+        assert_eq!(chunk.text, "ok");
+        assert_eq!(saw.await.unwrap().as_deref(), Some("case-123"));
+    }
+
+    #[tokio::test]
+    async fn plain_build_sends_no_attribution_header() {
+        let (base_url, saw) = one_shot_openai_stub().await;
+        let model = ChatModelConfig::vllm(base_url, "stub-model")
+            .build_with_params(ModelParams::default())
+            .expect("build plain model");
+        let chunk = model.next(&[user("hi")], &[]).await.expect("chat call");
+        assert_eq!(chunk.text, "ok");
+        assert_eq!(saw.await.unwrap(), None);
+    }
+
+    #[test]
+    fn extra_headers_rejected_off_openai_compat() {
+        let headers = [("X-Ditto-Case-Id", "case-123")];
+        let err = ChatModelConfig::ollama("", "gemma3:4b")
+            .build_with_params_and_headers(ModelParams::default(), &headers)
+            .err()
+            .expect("ollama must reject extra headers");
+        assert!(err.to_string().contains("openai-compatible"));
+        let err = ChatModelConfig::openrouter("k", "meta-llama/llama-3-8b")
+            .build_with_params_and_headers(ModelParams::default(), &headers)
+            .err()
+            .expect("openrouter must reject extra headers");
+        assert!(err.to_string().contains("openai-compatible"));
+        let err = ChatModelConfig::vllm("http://127.0.0.1:1", "m")
+            .build_with_params_and_headers(ModelParams::default(), &[("bad name", "v")])
+            .err()
+            .expect("invalid header name must be rejected");
+        assert!(err.to_string().contains("header name"));
     }
 
     /// Chat model for the ollama-gated integration tests. Defaults to
