@@ -119,14 +119,38 @@ impl ChatModelConfig {
     }
 
     /// Builds like [`ChatModelConfig::build_with_params`], additionally
-    /// attaching `extra_headers` to every request the model issues.
+    /// attaching `extra_headers` to every request the returned model issues.
     ///
-    /// Plain OpenAI-compatible endpoints only: the use case is per-request
-    /// attribution that the SN118 platform broker records verbatim (e.g.
-    /// `X-Ditto-Case-Id`, which it verifies against the cases in flight).
-    /// OpenRouter and Ollama builds reject non-empty headers rather than
-    /// silently dropping them, so a caller cannot believe attribution is
-    /// flowing when it is not. An empty slice is exactly
+    /// These are the model's DEFAULT headers, fixed when it is built. They are
+    /// not chosen per [`Model::next`] call, so one model carries one set of
+    /// header values for its whole life. Build a separate model per unit of
+    /// work whose headers differ:
+    ///
+    /// ```no_run
+    /// # use ditto_harness::models::{ChatModelConfig, ModelParams};
+    /// # fn example(config: &ChatModelConfig, case_id: &str) -> ditto_harness::Result<()> {
+    /// let case_model = config.build_with_params_and_headers(
+    ///     ModelParams::default(),
+    ///     &[("X-Ditto-Case-Id", case_id)],
+    /// )?;
+    /// # let _ = case_model;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// Sharing ONE headered model across overlapping units is a correctness
+    /// bug, not merely imprecise: a model built for case A stamps A's header on
+    /// case B's calls too, and while A is still in flight a receiver that
+    /// verifies the claim against the work actually in flight will accept it,
+    /// filing B's calls under A. Models are independent — building one per case
+    /// needs no lock around inference, and concurrent calls on distinct models
+    /// do not serialize.
+    ///
+    /// Plain OpenAI-compatible endpoints only; the use case is attribution a
+    /// receiver records verbatim (e.g. SN118's `X-Ditto-Case-Id`). OpenRouter
+    /// and Ollama builds reject non-empty headers rather than silently
+    /// dropping them, so a caller cannot believe attribution is flowing when it
+    /// is not. An empty slice is exactly
     /// [`ChatModelConfig::build_with_params`] for every provider.
     pub fn build_with_params_and_headers(
         &self,
@@ -696,6 +720,140 @@ mod tests {
             let _ = tx.send(case);
         });
         (base_url, rx)
+    }
+
+    async fn barrier_openai_stub(
+        parties: usize,
+    ) -> (
+        String,
+        std::sync::Arc<tokio::sync::Mutex<Vec<Option<String>>>>,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let seen = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(parties));
+        let collected = seen.clone();
+        tokio::spawn(async move {
+            for _ in 0..parties {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let seen = collected.clone();
+                let barrier = barrier.clone();
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    let header_end = loop {
+                        let n = sock.read(&mut chunk).await.unwrap();
+                        if n == 0 {
+                            break buf.len();
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                            break pos + 4;
+                        }
+                    };
+                    let head = String::from_utf8_lossy(&buf[..header_end]).to_string();
+                    let content_length = head
+                        .lines()
+                        .find_map(|l| {
+                            let (name, value) = l.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())?
+                        })
+                        .unwrap_or(0);
+                    while buf.len() < header_end + content_length {
+                        let n = sock.read(&mut chunk).await.unwrap();
+                        if n == 0 {
+                            break;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                    }
+                    let case = head.lines().find_map(|l| {
+                        let (name, value) = l.split_once(':')?;
+                        name.eq_ignore_ascii_case("x-ditto-case-id")
+                            .then(|| value.trim().to_string())
+                    });
+                    seen.lock().await.push(case);
+                    barrier.wait().await;
+                    let body = serde_json::json!({
+                        "id": "cmpl-stub", "object": "chat.completion", "created": 0,
+                        "model": "stub-model",
+                        "choices": [{"index": 0, "finish_reason": "stop",
+                                     "message": {"role": "assistant", "content": "ok"}}],
+                        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                    })
+                    .to_string();
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    sock.write_all(resp.as_bytes()).await.unwrap();
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        (base_url, seen)
+    }
+
+    #[tokio::test]
+    async fn per_case_models_attribute_overlapping_calls() {
+        let (base_url, seen) = barrier_openai_stub(2).await;
+        let config = ChatModelConfig::vllm(base_url, "stub-model");
+        let model_a = config
+            .build_with_params_and_headers(ModelParams::default(), &[("X-Ditto-Case-Id", "case-A")])
+            .expect("build case-A model");
+        let model_b = config
+            .build_with_params_and_headers(ModelParams::default(), &[("X-Ditto-Case-Id", "case-B")])
+            .expect("build case-B model");
+
+        let call_a = tokio::spawn(async move { model_a.next(&[user("a")], &[]).await });
+        let call_b = tokio::spawn(async move { model_b.next(&[user("b")], &[]).await });
+        let (ra, rb) = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            futures::future::join(call_a, call_b),
+        )
+        .await
+        .expect("overlapping calls did not both reach the server");
+
+        assert_eq!(ra.unwrap().expect("case-A call").text, "ok");
+        assert_eq!(rb.unwrap().expect("case-B call").text, "ok");
+        let mut got: Vec<String> = seen
+            .lock()
+            .await
+            .iter()
+            .map(|c| c.clone().unwrap_or_default())
+            .collect();
+        got.sort();
+        assert_eq!(got, vec!["case-A".to_string(), "case-B".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn one_shared_model_stamps_one_case_on_every_call() {
+        let (base_url, seen) = barrier_openai_stub(2).await;
+        let shared = ChatModelConfig::vllm(base_url, "stub-model")
+            .build_with_params_and_headers(ModelParams::default(), &[("X-Ditto-Case-Id", "case-A")])
+            .expect("build shared model");
+
+        let serving_b = shared.clone();
+        let call_a = tokio::spawn(async move { shared.next(&[user("a")], &[]).await });
+        let call_b = tokio::spawn(async move { serving_b.next(&[user("b")], &[]).await });
+        let (ra, rb) = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            futures::future::join(call_a, call_b),
+        )
+        .await
+        .expect("overlapping calls did not both reach the server");
+        assert_eq!(ra.unwrap().expect("case-A call").text, "ok");
+        assert_eq!(rb.unwrap().expect("shared-model call").text, "ok");
+
+        let got: Vec<String> = seen
+            .lock()
+            .await
+            .iter()
+            .map(|c| c.clone().unwrap_or_default())
+            .collect();
+        assert_eq!(got, vec!["case-A".to_string(), "case-A".to_string()]);
     }
 
     #[tokio::test]
