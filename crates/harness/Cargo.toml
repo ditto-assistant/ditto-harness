@@ -18,6 +18,7 @@ thiserror = { workspace = true }
 async-trait = { workspace = true }
 tracing = { workspace = true }
 reqwest = { workspace = true }
+http = { workspace = true }
 futures = { workspace = true }
 
 [dev-dependencies]

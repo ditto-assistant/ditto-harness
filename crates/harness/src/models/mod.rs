@@ -118,6 +118,104 @@ impl ChatModelConfig {
         self.build_with_params(ModelParams::default())
     }
 
+    /// Builds like [`ChatModelConfig::build_with_params`], additionally
+    /// attaching `extra_headers` to every request the returned model issues.
+    ///
+    /// These are the model's DEFAULT headers, fixed when it is built. They are
+    /// not chosen per [`Model::next`] call, so one model carries one set of
+    /// header values for its whole life. Build a separate model per unit of
+    /// work whose headers differ:
+    ///
+    /// ```no_run
+    /// # use ditto_harness::models::{ChatModelConfig, ModelParams};
+    /// # fn example(config: &ChatModelConfig, case_id: &str) -> ditto_harness::Result<()> {
+    /// let case_model = config.build_with_params_and_headers(
+    ///     ModelParams::default(),
+    ///     &[("X-Ditto-Case-Id", case_id)],
+    /// )?;
+    /// # let _ = case_model;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// Sharing ONE headered model across overlapping units is a correctness
+    /// bug, not merely imprecise: a model built for case A stamps A's header on
+    /// case B's calls too, and while A is still in flight a receiver that
+    /// verifies the claim against the work actually in flight will accept it,
+    /// filing B's calls under A. Models are independent — building one per case
+    /// needs no lock around inference, and concurrent calls on distinct models
+    /// do not serialize.
+    ///
+    /// Plain OpenAI-compatible endpoints only; the use case is attribution a
+    /// receiver records verbatim (e.g. SN118's `X-Ditto-Case-Id`). OpenRouter
+    /// and Ollama builds reject non-empty headers rather than silently
+    /// dropping them, so a caller cannot believe attribution is flowing when it
+    /// is not. An empty slice is exactly
+    /// [`ChatModelConfig::build_with_params`] for every provider.
+    pub fn build_with_params_and_headers(
+        &self,
+        params: ModelParams,
+        extra_headers: &[(&str, &str)],
+    ) -> Result<Arc<dyn Model>> {
+        if extra_headers.is_empty() {
+            return self.build_with_params(params);
+        }
+        let ChatModelConfig::OpenAiCompat {
+            base_url,
+            api_key,
+            model,
+        } = self
+        else {
+            return Err(Error::InvalidArgument(
+                "extra headers are only supported for openai-compatible endpoints".into(),
+            ));
+        };
+        if is_openrouter_base_url(base_url) {
+            return Err(Error::InvalidArgument(
+                "extra headers are only supported for openai-compatible endpoints".into(),
+            ));
+        }
+        if base_url.is_empty() {
+            return Err(Error::InvalidArgument(
+                "openai-compatible base_url required".into(),
+            ));
+        }
+        if model.is_empty() {
+            return Err(Error::InvalidArgument(
+                "openai-compatible model name required".into(),
+            ));
+        }
+        // rig bundles its own reqwest (0.13); the workspace one (0.12) is a
+        // different crate and does not satisfy rig's `HttpClientExt`. Build
+        // the headered client through rig's re-export so the versions agree.
+        let mut headers = rig_core::http_client::HeaderMap::new();
+        for (name, value) in extra_headers {
+            let header_name = http::HeaderName::from_bytes(name.as_bytes())
+                .map_err(|err| Error::InvalidArgument(format!("header name {name:?}: {err}")))?;
+            let header_value =
+                rig_core::http_client::HeaderValue::from_str(value).map_err(|err| {
+                    Error::InvalidArgument(format!("value for header {name:?}: {err}"))
+                })?;
+            headers.insert(header_name, header_value);
+        }
+        let http = rig_core::http_client::ReqwestClient::builder()
+            .default_headers(headers)
+            .build()
+            .map_err(|err| Error::Model(format!("http client: {err}")))?;
+        let client = rig_openai::CompletionsClient::builder()
+            .api_key::<BearerAuth>(api_key.clone())
+            .base_url(base_url)
+            .http_client(http)
+            .build()
+            .map_err(|err| Error::Model(format!("openai-compatible client: {err}")))?;
+        Ok(Arc::new(RigModel {
+            inner: client.completion_model(model.clone()),
+            provider: "openai-compat".to_string(),
+            model: model.clone(),
+            params,
+        }))
+    }
+
     /// Builds a [`Model`] backed by rig-core for this configuration. The
     /// returned model maps `ChatMessage`/`ToolDefinition` to the provider
     /// request, and provider tool calls / text / usage back into a
@@ -559,6 +657,248 @@ mod tests {
             content: vec![Content::text(text)],
             ..ChatMessage::default()
         }
+    }
+
+    /// One-shot OpenAI-compatible stub: accepts a single connection, replies
+    /// with a canned `chat.completion`, and reports the value of
+    /// `x-ditto-case-id` it saw (None when the header never arrived).
+    async fn one_shot_openai_stub() -> (String, tokio::sync::oneshot::Receiver<Option<String>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 4096];
+            let header_end = loop {
+                let n = sock.read(&mut chunk).await.unwrap();
+                if n == 0 {
+                    break buf.len();
+                }
+                buf.extend_from_slice(&chunk[..n]);
+                if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break pos + 4;
+                }
+            };
+            let head = String::from_utf8_lossy(&buf[..header_end]).to_string();
+            let content_length = head
+                .lines()
+                .find_map(|l| {
+                    let (name, value) = l.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())?
+                })
+                .unwrap_or(0);
+            while buf.len() < header_end + content_length {
+                let n = sock.read(&mut chunk).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+            }
+            let case = head.lines().find_map(|l| {
+                let (name, value) = l.split_once(':')?;
+                name.eq_ignore_ascii_case("x-ditto-case-id")
+                    .then(|| value.trim().to_string())
+            });
+            let body = serde_json::json!({
+                "id": "cmpl-stub", "object": "chat.completion", "created": 0,
+                "model": "stub-model",
+                "choices": [{"index": 0, "finish_reason": "stop",
+                             "message": {"role": "assistant", "content": "ok"}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+            })
+            .to_string();
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            sock.write_all(resp.as_bytes()).await.unwrap();
+            let _ = sock.shutdown().await;
+            let _ = tx.send(case);
+        });
+        (base_url, rx)
+    }
+
+    async fn barrier_openai_stub(
+        parties: usize,
+    ) -> (
+        String,
+        std::sync::Arc<tokio::sync::Mutex<Vec<Option<String>>>>,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let seen = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(parties));
+        let collected = seen.clone();
+        tokio::spawn(async move {
+            for _ in 0..parties {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let seen = collected.clone();
+                let barrier = barrier.clone();
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    let header_end = loop {
+                        let n = sock.read(&mut chunk).await.unwrap();
+                        if n == 0 {
+                            break buf.len();
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                            break pos + 4;
+                        }
+                    };
+                    let head = String::from_utf8_lossy(&buf[..header_end]).to_string();
+                    let content_length = head
+                        .lines()
+                        .find_map(|l| {
+                            let (name, value) = l.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())?
+                        })
+                        .unwrap_or(0);
+                    while buf.len() < header_end + content_length {
+                        let n = sock.read(&mut chunk).await.unwrap();
+                        if n == 0 {
+                            break;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                    }
+                    let case = head.lines().find_map(|l| {
+                        let (name, value) = l.split_once(':')?;
+                        name.eq_ignore_ascii_case("x-ditto-case-id")
+                            .then(|| value.trim().to_string())
+                    });
+                    seen.lock().await.push(case);
+                    barrier.wait().await;
+                    let body = serde_json::json!({
+                        "id": "cmpl-stub", "object": "chat.completion", "created": 0,
+                        "model": "stub-model",
+                        "choices": [{"index": 0, "finish_reason": "stop",
+                                     "message": {"role": "assistant", "content": "ok"}}],
+                        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                    })
+                    .to_string();
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    sock.write_all(resp.as_bytes()).await.unwrap();
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        (base_url, seen)
+    }
+
+    #[tokio::test]
+    async fn per_case_models_attribute_overlapping_calls() {
+        let (base_url, seen) = barrier_openai_stub(2).await;
+        let config = ChatModelConfig::vllm(base_url, "stub-model");
+        let model_a = config
+            .build_with_params_and_headers(ModelParams::default(), &[("X-Ditto-Case-Id", "case-A")])
+            .expect("build case-A model");
+        let model_b = config
+            .build_with_params_and_headers(ModelParams::default(), &[("X-Ditto-Case-Id", "case-B")])
+            .expect("build case-B model");
+
+        let call_a = tokio::spawn(async move { model_a.next(&[user("a")], &[]).await });
+        let call_b = tokio::spawn(async move { model_b.next(&[user("b")], &[]).await });
+        let (ra, rb) = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            futures::future::join(call_a, call_b),
+        )
+        .await
+        .expect("overlapping calls did not both reach the server");
+
+        assert_eq!(ra.unwrap().expect("case-A call").text, "ok");
+        assert_eq!(rb.unwrap().expect("case-B call").text, "ok");
+        let mut got: Vec<String> = seen
+            .lock()
+            .await
+            .iter()
+            .map(|c| c.clone().unwrap_or_default())
+            .collect();
+        got.sort();
+        assert_eq!(got, vec!["case-A".to_string(), "case-B".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn one_shared_model_stamps_one_case_on_every_call() {
+        let (base_url, seen) = barrier_openai_stub(2).await;
+        let shared = ChatModelConfig::vllm(base_url, "stub-model")
+            .build_with_params_and_headers(ModelParams::default(), &[("X-Ditto-Case-Id", "case-A")])
+            .expect("build shared model");
+
+        let serving_b = shared.clone();
+        let call_a = tokio::spawn(async move { shared.next(&[user("a")], &[]).await });
+        let call_b = tokio::spawn(async move { serving_b.next(&[user("b")], &[]).await });
+        let (ra, rb) = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            futures::future::join(call_a, call_b),
+        )
+        .await
+        .expect("overlapping calls did not both reach the server");
+        assert_eq!(ra.unwrap().expect("case-A call").text, "ok");
+        assert_eq!(rb.unwrap().expect("shared-model call").text, "ok");
+
+        let got: Vec<String> = seen
+            .lock()
+            .await
+            .iter()
+            .map(|c| c.clone().unwrap_or_default())
+            .collect();
+        assert_eq!(got, vec!["case-A".to_string(), "case-A".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn extra_headers_reach_the_wire() {
+        let (base_url, saw) = one_shot_openai_stub().await;
+        let model = ChatModelConfig::vllm(base_url, "stub-model")
+            .build_with_params_and_headers(
+                ModelParams::default(),
+                &[("X-Ditto-Case-Id", "case-123")],
+            )
+            .expect("build headered model");
+        let chunk = model.next(&[user("hi")], &[]).await.expect("chat call");
+        assert_eq!(chunk.text, "ok");
+        assert_eq!(saw.await.unwrap().as_deref(), Some("case-123"));
+    }
+
+    #[tokio::test]
+    async fn plain_build_sends_no_attribution_header() {
+        let (base_url, saw) = one_shot_openai_stub().await;
+        let model = ChatModelConfig::vllm(base_url, "stub-model")
+            .build_with_params(ModelParams::default())
+            .expect("build plain model");
+        let chunk = model.next(&[user("hi")], &[]).await.expect("chat call");
+        assert_eq!(chunk.text, "ok");
+        assert_eq!(saw.await.unwrap(), None);
+    }
+
+    #[test]
+    fn extra_headers_rejected_off_openai_compat() {
+        let headers = [("X-Ditto-Case-Id", "case-123")];
+        let err = ChatModelConfig::ollama("", "gemma3:4b")
+            .build_with_params_and_headers(ModelParams::default(), &headers)
+            .err()
+            .expect("ollama must reject extra headers");
+        assert!(err.to_string().contains("openai-compatible"));
+        let err = ChatModelConfig::openrouter("k", "meta-llama/llama-3-8b")
+            .build_with_params_and_headers(ModelParams::default(), &headers)
+            .err()
+            .expect("openrouter must reject extra headers");
+        assert!(err.to_string().contains("openai-compatible"));
+        let err = ChatModelConfig::vllm("http://127.0.0.1:1", "m")
+            .build_with_params_and_headers(ModelParams::default(), &[("bad name", "v")])
+            .err()
+            .expect("invalid header name must be rejected");
+        assert!(err.to_string().contains("header name"));
     }
 
     /// Chat model for the ollama-gated integration tests. Defaults to
