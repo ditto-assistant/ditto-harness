@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //! Importable multi-turn agent loop with injectable model/tools, stream-style
-//! event hooks, tool loop detection, and cost collection.
+//! event hooks, pre-execution repetition detection, and cost collection.
 
 pub mod loopdetect;
 
@@ -19,10 +19,10 @@ use crate::types::{
 /// Max model turns per run when unset.
 pub const DEFAULT_MAX_TURNS: usize = 8;
 
-/// Synthesis prompt injected after a tool loop is detected.
+/// Legacy loop-break prompt, retained for callers that display old transcripts.
 pub const LOOP_BREAK_SYNTHESIS_PROMPT: &str = "You repeated the same tool call several times without producing a final answer. Stop calling tools and answer the user's request now using the conversation context and the tool results you already have. If the available results are incomplete, say that briefly and answer with what you have.";
 
-/// Tool output substituted for a loop-detected call, as a JSON value.
+/// Legacy loop-break result, retained for callers that display old transcripts.
 pub fn loop_break_tool_result() -> Value {
     serde_json::json!({
         "status": "loop_detected",
@@ -80,7 +80,18 @@ pub trait EventHandler: Send + Sync {
     fn send_tool_call_progress(&self, _tool_call_id: &str, _data: &Value) {}
     /// Fires when the model finished streaming the call block — emitted BEFORE the tool executes.
     fn send_tool_call_completed(&self, _tool_call_id: &str, _tool_name: &str) {}
-    /// Fires after the tool executed (or a loop break substituted a canned result).
+    /// Decides a second or later identical call before execution. The previous
+    /// response is supplied so the host can distinguish a successful effect
+    /// from a pre-delivery failure. The default preserves model-selected calls;
+    /// hosts with side-effect contracts can block an unapproved repeat.
+    fn decide_repeated_tool_call(
+        &self,
+        _detection: &loopdetect::Detection,
+        _previous_response: Option<&ToolCallResponse>,
+    ) -> RepeatedCallDecision {
+        RepeatedCallDecision::Execute
+    }
+    /// Fires after the tool executed.
     fn send_tool_result(&self, _result: &ToolCallResponse) {}
     /// Fires when a model call fails, just before the run returns that error.
     fn send_error(&self, _err: &Error) {}
@@ -91,6 +102,13 @@ pub trait EventHandler: Send + Sync {
 pub struct NoopHandler;
 
 impl EventHandler for NoopHandler {}
+
+/// A host's decision for a detected repeated tool call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepeatedCallDecision {
+    Execute,
+    Block,
+}
 
 impl Loop {
     /// Creates a loop.
@@ -109,9 +127,9 @@ impl Loop {
 
     /// Runs up to `max_turns` model turns: a text chunk finishes the run; a
     /// tool call is executed and appended as a role:"tool" message, with a
-    /// detected tool loop breaking to a synthesis prompt and no further
-    /// tools. With `save_memory`, the final text is persisted via the memory
-    /// store.
+    /// bounded number of model turns. With `save_memory`, the final text is
+    /// persisted via the memory store. Identical tool calls are still executed:
+    /// only the caller can know whether a repetition was separately requested.
     ///
     /// "Streaming" here means per-event [`EventHandler`] hooks (chat content,
     /// tool progress/results, errors), not token streaming: each turn is one
@@ -137,6 +155,7 @@ impl Loop {
         let mut state = TurnState {
             messages: req.messages.clone(),
             detector: loopdetect::Detector::default(),
+            last_result: None,
             defs,
             tools_by_name,
         };
@@ -249,16 +268,13 @@ impl Loop {
 struct TurnState {
     messages: Vec<ChatMessage>,
     detector: loopdetect::Detector,
+    last_result: Option<(loopdetect::ToolCallKey, ToolCallResponse)>,
     defs: Vec<ToolDefinition>,
     tools_by_name: HashMap<String, Arc<dyn Tool>>,
 }
 
 /// Handles one tool-call turn: emits the tool events, appends the assistant
-/// tool-call message, and either executes the call (appending its
-/// role:"tool" response) or — when [`loopdetect::Detector`] flags 3 identical
-/// consecutive calls — substitutes [`loop_break_tool_result`], injects
-/// [`LOOP_BREAK_SYNTHESIS_PROMPT`] as a user message, and clears the state's
-/// `defs`/`tools_by_name` so subsequent turns run without tools.
+/// tool-call message, then executes the call and appends its role:"tool" response.
 async fn handle_tool_call(
     handler: &dyn EventHandler,
     state: &mut TurnState,
@@ -281,27 +297,24 @@ async fn handle_tool_call(
         name: tc.name.clone(),
         args: args_string,
     };
-    if state.detector.record_turn(turn, &[key]).is_some() {
-        let resp = ToolCallResponse {
-            id: tc.id.clone(),
-            name: tc.name.clone(),
-            output: loop_break_tool_result(),
-            error: String::new(),
-        };
-        handler.send_tool_result(&resp);
-        state.messages.push(tool_message(resp));
-        state.messages.push(ChatMessage {
-            role: "user".to_string(),
-            content: vec![Content {
-                content_type: Some(ContentType::Text),
-                content: LOOP_BREAK_SYNTHESIS_PROMPT.to_string(),
-                ..Content::default()
-            }],
-            ..ChatMessage::default()
-        });
-        state.defs.clear();
-        state.tools_by_name.clear();
-        return;
+    if let Some(detection) = state.detector.record_turn(turn, std::slice::from_ref(&key)) {
+        let previous_response = state
+            .last_result
+            .as_ref()
+            .and_then(|(previous_key, response)| (previous_key == &key).then_some(response));
+        if handler.decide_repeated_tool_call(&detection, previous_response)
+            == RepeatedCallDecision::Block
+        {
+            let resp = ToolCallResponse {
+                id: tc.id.clone(),
+                name: tc.name.clone(),
+                output: serde_json::json!({"status": "blocked_before_execution"}),
+                error: "repeated tool call blocked before execution".to_string(),
+            };
+            handler.send_tool_result(&resp);
+            state.messages.push(tool_message(resp));
+            return;
+        }
     }
 
     let mut results = execute_calls(&state.tools_by_name, std::slice::from_ref(&tc)).await;
@@ -316,6 +329,7 @@ async fn handle_tool_call(
         results.remove(0)
     };
     handler.send_tool_result(&resp);
+    state.last_result = Some((key, resp.clone()));
     state.messages.push(tool_message(resp));
 }
 
@@ -455,6 +469,9 @@ mod tests {
         tool_progress_ids: Mutex<Vec<String>>,
         tool_completed_ids: Mutex<Vec<String>>,
         tool_result_ids: Mutex<Vec<String>>,
+        repeated_calls: Mutex<Vec<loopdetect::Detection>>,
+        execution_events: Mutex<Vec<String>>,
+        block_successful_repeats: bool,
         errors: Mutex<Vec<String>>,
     }
 
@@ -473,6 +490,28 @@ mod tests {
                 .push(tool_call_id.to_string());
         }
 
+        fn decide_repeated_tool_call(
+            &self,
+            detection: &loopdetect::Detection,
+            previous_response: Option<&ToolCallResponse>,
+        ) -> RepeatedCallDecision {
+            self.repeated_calls
+                .lock()
+                .expect("lock")
+                .push(detection.clone());
+            self.execution_events
+                .lock()
+                .expect("lock")
+                .push("repeat".to_string());
+            if self.block_successful_repeats
+                && previous_response.is_some_and(|response| response.error.is_empty())
+            {
+                RepeatedCallDecision::Block
+            } else {
+                RepeatedCallDecision::Execute
+            }
+        }
+
         fn send_tool_call_completed(&self, tool_call_id: &str, _tool_name: &str) {
             self.tool_completed_ids
                 .lock()
@@ -482,6 +521,10 @@ mod tests {
 
         fn send_tool_result(&self, result: &ToolCallResponse) {
             self.tool_result_ids
+                .lock()
+                .expect("lock")
+                .push(result.id.clone());
+            self.execution_events
                 .lock()
                 .expect("lock")
                 .push(result.id.clone());
@@ -576,32 +619,112 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn loop_breaks_repeated_tool_call_and_synthesizes_final_answer() {
+    async fn loop_preserves_requested_repetitions_and_later_tools() {
         let same_args = serde_json::json!({"q": "same"});
+        let handler = RecordingHandler::default();
         let agent_loop = echo_loop(vec![
             tool_call_chunk("call_1", same_args.clone()),
             tool_call_chunk("call_2", same_args.clone()),
             tool_call_chunk("call_3", same_args),
-            text_chunk("final after loop break"),
+            tool_call_chunk("call_4", serde_json::json!({"q": "different"})),
+            text_chunk("final after requested calls"),
         ]);
 
         let result = agent_loop
-            .run(RunRequest {
-                messages: vec![user_message("hello")],
-                max_turns: 5,
-                ..RunRequest::default()
-            })
+            .run_streaming(
+                RunRequest {
+                    messages: vec![user_message("send it three times, then do another task")],
+                    max_turns: 5,
+                    ..RunRequest::default()
+                },
+                &handler,
+            )
             .await
             .expect("run");
-        assert_eq!(result.text, "final after loop break");
-        let saw_prompt = result.messages.iter().any(|msg| {
+        assert_eq!(result.text, "final after requested calls");
+        let repeated = handler.repeated_calls.lock().expect("lock");
+        assert_eq!(repeated.len(), 2);
+        assert_eq!(repeated[0].turn, 1);
+        assert_eq!(repeated[0].consecutive_calls, 2);
+        assert_eq!(repeated[1].turn, 2);
+        assert_eq!(repeated[1].consecutive_calls, 3);
+        assert_eq!(
+            *handler.execution_events.lock().expect("lock"),
+            ["call_1", "repeat", "call_2", "repeat", "call_3", "call_4"]
+                .map(str::to_string)
+                .to_vec()
+        );
+        assert_eq!(
+            result
+                .messages
+                .iter()
+                .filter(|msg| msg.role == "tool")
+                .count(),
+            4,
+            "every model-emitted call must have a tool response"
+        );
+        let tool_outputs: Vec<&Value> = result
+            .messages
+            .iter()
+            .filter(|msg| msg.role == "tool")
+            .filter_map(|msg| msg.content.first())
+            .filter_map(|part| part.tool_call_response.as_ref())
+            .map(|response| &response.output)
+            .collect();
+        assert_eq!(tool_outputs[2]["output"], serde_json::json!({"q": "same"}));
+        assert_eq!(
+            tool_outputs[3]["output"],
+            serde_json::json!({"q": "different"})
+        );
+        assert!(!result.messages.iter().any(|msg| {
             msg.role == "user"
                 && msg
                     .content
                     .iter()
                     .any(|content| content.content == LOOP_BREAK_SYNTHESIS_PROMPT)
-        });
-        assert!(saw_prompt, "loop-break synthesis prompt was not appended");
+        }));
+    }
+
+    #[tokio::test]
+    async fn host_blocks_successful_duplicate_before_execution_without_revoking_tools() {
+        let handler = RecordingHandler {
+            block_successful_repeats: true,
+            ..RecordingHandler::default()
+        };
+        let agent_loop = echo_loop(vec![
+            tool_call_chunk("call_1", serde_json::json!({"q": "same"})),
+            tool_call_chunk("call_2", serde_json::json!({"q": "same"})),
+            tool_call_chunk("call_3", serde_json::json!({"q": "different"})),
+            text_chunk("done"),
+        ]);
+        let result = agent_loop
+            .run_streaming(
+                RunRequest {
+                    messages: vec![user_message("call once, then do another task")],
+                    max_turns: 4,
+                    ..RunRequest::default()
+                },
+                &handler,
+            )
+            .await
+            .expect("run");
+        let outputs: Vec<&Value> = result
+            .messages
+            .iter()
+            .filter(|msg| msg.role == "tool")
+            .filter_map(|msg| msg.content.first())
+            .filter_map(|part| part.tool_call_response.as_ref())
+            .map(|response| &response.output)
+            .collect();
+        assert_eq!(outputs[0]["output"], serde_json::json!({"q": "same"}));
+        assert_eq!(outputs[1]["output"]["status"], "blocked_before_execution");
+        assert_eq!(outputs[2]["output"], serde_json::json!({"q": "different"}));
+        assert_eq!(
+            *handler.execution_events.lock().expect("lock"),
+            ["call_1", "repeat", "call_2", "call_3"]
+                .map(str::to_string)
+                .to_vec()
+        );
     }
 
     #[tokio::test]
