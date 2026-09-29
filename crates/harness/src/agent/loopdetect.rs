@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 //! Detection of repeated identical tool calls.
 
-/// Number of identical consecutive calls that triggers detection.
-pub const MAX_CONSECUTIVE_SAME_TOOL_CALLS: usize = 3;
+/// Detect before executing the second identical call.
+pub const MAX_CONSECUTIVE_SAME_TOOL_CALLS: usize = 2;
 
 /// A tool call identity: name plus raw argument string.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -78,15 +78,15 @@ mod tests {
             detector.record_turn(0, &call()).is_none(),
             "first turn detected loop"
         );
-        assert!(
-            detector.record_turn(1, &call()).is_none(),
-            "second turn detected loop"
-        );
         let detection = detector
-            .record_turn(2, &call())
-            .expect("third repeated turn did not detect loop");
+            .record_turn(1, &call())
+            .expect("second identical turn was not detected");
         assert_eq!(detection.consecutive_calls, MAX_CONSECUTIVE_SAME_TOOL_CALLS);
-        assert_eq!(detection.turn, 2);
+        assert_eq!(detection.turn, 1);
+        assert_eq!(
+            detector.record_turn(2, &call()).unwrap().consecutive_calls,
+            3
+        );
     }
 
     #[test]

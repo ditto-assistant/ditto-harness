@@ -72,8 +72,11 @@ The crate serves a chat turn and ingests memories into the subject graph.
    block.
 2. `agent::Loop::run_streaming`: up to `max_turns` model turns; each turn
   either ends the run with final text or dispatches one tool call. Repeated
-   identical tool calls trip loop detection, which substitutes a canned tool
-   result and a synthesis prompt. `agent::EventHandler` observes each step.
+   identical calls are detected before the second execution. The
+   `agent::EventHandler` can block an unapproved repeat using the previous tool
+   response, or allow a separately requested repetition. The loop does not
+   infer user authorization from identical arguments. The `max_turns` limit
+   bounds the run.
 3. Optional save: with `save_memory`, the final exchange is persisted via
   `Store::save_memory`, carrying the seed-memory and retrieval metadata from
    preparation.
