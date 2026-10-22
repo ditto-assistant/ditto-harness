@@ -172,7 +172,21 @@ impl Loop {
                 }
             };
             costs.add(chunk.cost.as_ref());
-            let Some(tc) = chunk.tool_call else {
+            let calls = if chunk.tool_calls.is_empty() {
+                chunk.tool_call.into_iter().collect::<Vec<_>>()
+            } else {
+                if chunk
+                    .tool_call
+                    .as_ref()
+                    .is_some_and(|first| Some(first) != chunk.tool_calls.first())
+                {
+                    let err = Error::Model("conflicting singular and plural tool calls".into());
+                    handler.send_error(&err);
+                    return Err(err);
+                }
+                chunk.tool_calls
+            };
+            if calls.is_empty() {
                 finished = true;
                 final_text = chunk.text.clone();
                 if !chunk.text.is_empty() {
@@ -188,9 +202,33 @@ impl Loop {
                     ..ChatMessage::default()
                 });
                 break;
-            };
+            }
 
-            handle_tool_call(handler, &mut state, turn, tc).await;
+            let keys: Vec<_> = calls
+                .iter()
+                .map(|call| loopdetect::ToolCallKey {
+                    name: call.name.clone(),
+                    args: tool_call_args_string(call),
+                })
+                .collect();
+            let detection = state.detector.record_turn(turn, &keys);
+            state.messages.push(ChatMessage {
+                role: "assistant".to_string(),
+                content: if chunk.text.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![Content {
+                        content_type: Some(ContentType::Text),
+                        content: chunk.text,
+                        ..Content::default()
+                    }]
+                },
+                tool_calls: calls.clone(),
+                ..ChatMessage::default()
+            });
+            for call in calls {
+                handle_tool_call(handler, &mut state, detection.as_ref(), call).await;
+            }
         }
 
         if req.save_memory && !final_text.is_empty() {
@@ -273,12 +311,12 @@ struct TurnState {
     tools_by_name: HashMap<String, Arc<dyn Tool>>,
 }
 
-/// Handles one tool-call turn: emits the tool events, appends the assistant
-/// tool-call message, then executes the call and appends its role:"tool" response.
+/// Executes one call from the already-recorded assistant turn, then appends
+/// its role:"tool" response. Repetition detection is computed for the full turn.
 async fn handle_tool_call(
     handler: &dyn EventHandler,
     state: &mut TurnState,
-    turn: usize,
+    detection: Option<&loopdetect::Detection>,
     tc: ToolCall,
 ) {
     let args_string = tool_call_args_string(&tc);
@@ -287,22 +325,16 @@ async fn handle_tool_call(
         &serde_json::json!({"name": tc.name, "arguments": args_string}),
     );
     handler.send_tool_call_completed(&tc.id, &tc.name);
-    state.messages.push(ChatMessage {
-        role: "assistant".to_string(),
-        tool_calls: vec![tc.clone()],
-        ..ChatMessage::default()
-    });
-
     let key = loopdetect::ToolCallKey {
         name: tc.name.clone(),
         args: args_string,
     };
-    if let Some(detection) = state.detector.record_turn(turn, std::slice::from_ref(&key)) {
+    if let Some(detection) = detection {
         let previous_response = state
             .last_result
             .as_ref()
             .and_then(|(previous_key, response)| (previous_key == &key).then_some(response));
-        if handler.decide_repeated_tool_call(&detection, previous_response)
+        if handler.decide_repeated_tool_call(detection, previous_response)
             == RepeatedCallDecision::Block
         {
             let resp = ToolCallResponse {
@@ -551,6 +583,90 @@ mod tests {
             text: text.to_string(),
             ..ChatChunk::default()
         }
+    }
+
+    #[tokio::test]
+    async fn loop_preserves_complete_multi_call_turn_and_receipts() {
+        let calls = vec![
+            ToolCall {
+                id: "first".into(),
+                name: "echo".into(),
+                args: serde_json::json!({"value": 1}),
+            },
+            ToolCall {
+                id: "second".into(),
+                name: "echo".into(),
+                args: serde_json::json!({"value": 2}),
+            },
+        ];
+        let agent_loop = echo_loop(vec![
+            ChatChunk {
+                text: "I will read both.".into(),
+                tool_call: Some(calls[0].clone()),
+                tool_calls: calls.clone(),
+                ..ChatChunk::default()
+            },
+            text_chunk("done"),
+        ]);
+        let handler = RecordingHandler::default();
+        let result = agent_loop
+            .run_streaming(
+                RunRequest {
+                    messages: vec![user_message("read both")],
+                    ..RunRequest::default()
+                },
+                &handler,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.text, "done");
+        assert_eq!(
+            *handler.tool_result_ids.lock().unwrap(),
+            vec!["first", "second"]
+        );
+        let assistant = &result.messages[1];
+        assert_eq!(assistant.tool_calls, calls);
+        assert_eq!(assistant.content[0].content, "I will read both.");
+        for (index, value) in [(2, 1), (3, 2)] {
+            let receipt = result.messages[index].content[0]
+                .tool_call_response
+                .as_ref()
+                .unwrap();
+            assert!(receipt.error.is_empty());
+            assert_eq!(
+                receipt.output["output"],
+                serde_json::json!({"value": value})
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn conflicting_compatibility_view_fails_before_execution() {
+        let agent_loop = echo_loop(vec![ChatChunk {
+            tool_call: Some(ToolCall {
+                id: "other".into(),
+                name: "echo".into(),
+                ..ToolCall::default()
+            }),
+            tool_calls: vec![ToolCall {
+                id: "first".into(),
+                name: "echo".into(),
+                ..ToolCall::default()
+            }],
+            ..ChatChunk::default()
+        }]);
+        let handler = RecordingHandler::default();
+        assert!(agent_loop
+            .run_streaming(
+                RunRequest {
+                    messages: vec![user_message("read")],
+                    ..RunRequest::default()
+                },
+                &handler
+            )
+            .await
+            .is_err());
+        assert!(handler.tool_result_ids.lock().unwrap().is_empty());
     }
 
     fn user_message(text: &str) -> ChatMessage {

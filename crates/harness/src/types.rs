@@ -358,6 +358,10 @@ pub struct ChatChunk {
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "toolCall")]
     pub tool_call: Option<ToolCall>,
+    /// Complete ordered calls selected in this turn. When non-empty this is
+    /// authoritative; `tool_call`, if present, is its first-call compatibility view.
+    #[serde(default, skip_serializing_if = "Vec::is_empty", rename = "toolCalls")]
+    pub tool_calls: Vec<ToolCall>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost: Option<CostedUsage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -370,8 +374,9 @@ pub type OnChunk<'a> = &'a (dyn Fn(ChatChunk) + Send + Sync);
 /// A chat model.
 ///
 /// `next` performs one turn: given the conversation and available tool
-/// definitions it returns either final text (`tool_call == None`) or a single
-/// tool call to execute.
+/// definitions it returns final text or the complete ordered tool-call list.
+/// Legacy models may return only `tool_call`; when both fields are populated,
+/// the singular field must equal the first entry of `tool_calls`.
 ///
 /// Streaming contract: `next_streaming` emits incremental [`ChatChunk`]
 /// deltas (partial `text`, then optionally a `tool_call`, then a final chunk
