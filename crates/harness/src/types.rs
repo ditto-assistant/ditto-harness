@@ -331,6 +331,9 @@ pub struct EmbedResponse {
 ///   [`crate::dream::SUBJECT_MERGE_THRESHOLD`] 0.75) are calibrated for
 ///   embeddinggemma. A different embedder shifts what those cosine values
 ///   mean; expect to retune them.
+// async-trait 0.1.89 emits an unmessaged must_use attribute on boxed futures.
+// Rust 1.99 flags that generated redundancy; the future remains must-use.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Embedder: Send + Sync {
     async fn embed(&self, req: EmbedRequest) -> Result<EmbedResponse>;
@@ -387,6 +390,9 @@ pub type OnChunk<'a> = &'a (dyn Fn(ChatChunk) + Send + Sync);
 /// Note: the built-in agent loop drives `next` only (its `run_streaming`
 /// streams loop *events*, not tokens); `next_streaming` is public API for
 /// hosts that surface token-level deltas themselves.
+// async-trait 0.1.89 emits an unmessaged must_use attribute on boxed futures.
+// Rust 1.99 flags that generated redundancy; the future remains must-use.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Model: Send + Sync {
     async fn next(&self, messages: &[ChatMessage], tools: &[ToolDefinition]) -> Result<ChatChunk>;
@@ -421,6 +427,9 @@ pub struct ToolDefinition {
 /// `execute` returns only the JSON output payload; the agent loop wraps it
 /// into a [`ToolCallResponse`] (filling `id`/`name`, mapping `Err` to
 /// `error`).
+// async-trait 0.1.89 emits an unmessaged must_use attribute on boxed futures.
+// Rust 1.99 flags that generated redundancy; the future remains must-use.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Tool: Send + Sync {
     fn definition(&self) -> ToolDefinition;
