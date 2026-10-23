@@ -468,8 +468,8 @@ fn to_rig_tools(tools: &[ToolDefinition]) -> Vec<RigToolDefinition> {
 }
 
 /// Aggregates a rig completion choice + usage into a harness [`ChatChunk`].
-/// Text parts concatenate; the first tool call wins (the harness loop executes
-/// one tool per turn). Token-only usage is reported with an empty `Cost`.
+/// Text parts concatenate and every tool call retains provider order. The
+/// singular call is a compatibility view. Usage is counted once per turn.
 fn chunk_from_choice(
     provider: &str,
     model: &str,
@@ -477,17 +477,17 @@ fn chunk_from_choice(
     usage: rig_core::completion::Usage,
 ) -> ChatChunk {
     let mut text = String::new();
-    let mut tool_call: Option<ToolCall> = None;
+    let mut tool_calls = Vec::new();
     for item in choice.iter() {
         match item {
             AssistantContent::Text(t) => text.push_str(&t.text),
-            AssistantContent::ToolCall(tc) if tool_call.is_none() => {
+            AssistantContent::ToolCall(tc) => {
                 let id = if tc.id.is_empty() {
                     format!("call_{}", uuid::Uuid::new_v4())
                 } else {
                     tc.id.clone()
                 };
-                tool_call = Some(ToolCall {
+                tool_calls.push(ToolCall {
                     id,
                     name: tc.function.name.clone(),
                     args: tc.function.arguments.clone(),
@@ -505,7 +505,8 @@ fn chunk_from_choice(
     };
     ChatChunk {
         text,
-        tool_call,
+        tool_call: tool_calls.first().cloned(),
+        tool_calls,
         cost: Some(CostedUsage {
             usage: Usage {
                 provider: provider.to_string(),
@@ -1090,6 +1091,131 @@ mod tests {
         assert_eq!(cost.usage.output_tokens, 5);
         assert_eq!(cost.usage.total_tokens, 15);
         assert_eq!(cost.usage.provider, "ollama");
+    }
+
+    #[test]
+    fn chunk_aggregation_preserves_every_selected_call_in_order() {
+        let choice = OneOrMany::many(vec![
+            AssistantContent::Text(RigText::new("read both")),
+            AssistantContent::ToolCall(RigToolCall::new(
+                "first".into(),
+                RigToolFunction::new("read".into(), json!({"id": "a"})),
+            )),
+            AssistantContent::ToolCall(RigToolCall::new(
+                "second".into(),
+                RigToolFunction::new("read".into(), json!({"id": "b"})),
+            )),
+        ])
+        .unwrap();
+        let chunk = chunk_from_choice("test", "test", &choice, rig_core::completion::Usage::new());
+        assert_eq!(chunk.text, "read both");
+        assert_eq!(chunk.tool_calls.len(), 2);
+        assert_eq!(chunk.tool_call.as_ref(), chunk.tool_calls.first());
+        assert_eq!(chunk.tool_calls[0].id, "first");
+        assert_eq!(chunk.tool_calls[0].args, json!({"id": "a"}));
+        assert_eq!(chunk.tool_calls[1].id, "second");
+        assert_eq!(chunk.tool_calls[1].args, json!({"id": "b"}));
+    }
+
+    #[tokio::test]
+    async fn openai_multi_call_turn_roundtrips_both_receipts() {
+        use crate::agent::{Loop, Options, RunRequest};
+        use crate::types::Tool;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        struct Echo;
+        #[async_trait]
+        impl Tool for Echo {
+            fn definition(&self) -> ToolDefinition {
+                ToolDefinition {
+                    name: "read".into(),
+                    input_schema: json!({"type":"object", "properties":{"id":{"type":"string"}}}),
+                    ..ToolDefinition::default()
+                }
+            }
+            async fn execute(&self, args: Value) -> Result<Value> {
+                Ok(args)
+            }
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for turn in 0..2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                let mut buffer = [0; 4096];
+                let header_end = loop {
+                    let count = socket.read(&mut buffer).await.unwrap();
+                    assert!(count > 0);
+                    bytes.extend_from_slice(&buffer[..count]);
+                    if let Some(index) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+                        break index + 4;
+                    }
+                };
+                let length = String::from_utf8_lossy(&bytes[..header_end])
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap();
+                assert!(length < 65536);
+                while bytes.len() < header_end + length {
+                    let count = socket.read(&mut buffer).await.unwrap();
+                    assert!(count > 0);
+                    bytes.extend_from_slice(&buffer[..count]);
+                }
+                requests.push(
+                    serde_json::from_slice::<Value>(&bytes[header_end..header_end + length])
+                        .unwrap(),
+                );
+                let message = if turn == 0 {
+                    json!({"role":"assistant", "content":"read both", "tool_calls":[
+                        {"id":"first", "type":"function", "function":{"name":"read", "arguments":"{\"id\":\"a\"}"}},
+                        {"id":"second", "type":"function", "function":{"name":"read", "arguments":"{\"id\":\"b\"}"}}
+                    ]})
+                } else {
+                    json!({"role":"assistant", "content":"done"})
+                };
+                let body = json!({"id":"completion", "object":"chat.completion", "created":0, "model":"stub", "choices":[{"index":0,"finish_reason":if turn==0 {"tool_calls"} else {"stop"},"message":message}], "usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}).to_string();
+                socket.write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",body.len(),body).as_bytes()).await.unwrap();
+            }
+            requests
+        });
+        let agent = Loop::new(Options {
+            model: ChatModelConfig::vllm(base_url, "stub").build().unwrap(),
+            memory: None,
+            tools: vec![Arc::new(Echo)],
+        });
+        let (result, requests) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let result = agent
+                .run(RunRequest {
+                    messages: vec![user("read both")],
+                    ..RunRequest::default()
+                })
+                .await
+                .unwrap();
+            (result, server.await.unwrap())
+        })
+        .await
+        .unwrap();
+        assert_eq!(result.text, "done");
+        assert_eq!(requests[0]["tools"], requests[1]["tools"]);
+        let messages = requests[1]["messages"].as_array().unwrap();
+        let assistant = messages
+            .iter()
+            .find(|message| message["role"] == "assistant")
+            .unwrap();
+        assert_eq!(assistant["tool_calls"].as_array().unwrap().len(), 2);
+        let receipts: Vec<_> = messages
+            .iter()
+            .filter(|message| message["role"] == "tool")
+            .collect();
+        assert_eq!(receipts.len(), 2);
+        assert_eq!(receipts[0]["tool_call_id"], "first");
+        assert_eq!(receipts[1]["tool_call_id"], "second");
     }
 
     /// Real-ollama integration test: requires `ollama serve` with a chat

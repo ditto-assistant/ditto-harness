@@ -227,6 +227,9 @@ pub struct Features {
 /// - `Features::query_embedding` is the 768-dimensional query vector
 ///   (`db::EMBEDDING_DIMS`); the other populated fields are `query`, `now`,
 ///   and `current_session_id`.
+// async-trait 0.1.89 emits an unmessaged must_use attribute on boxed futures.
+// Rust 1.99 flags that generated redundancy; the future remains must-use.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait WeightPredictor: Send + Sync {
     async fn predict(&self, features: &Features) -> Result<Weights>;
@@ -262,6 +265,9 @@ pub fn default_candidate_pool_size(limit: usize) -> usize {
 ///
 /// The concrete model (e.g. an ONNX cross-encoder + tokenizer + weights) lives in
 /// the consuming crate so this crate stays free of an inference runtime.
+// async-trait 0.1.89 emits an unmessaged must_use attribute on boxed futures.
+// Rust 1.99 flags that generated redundancy; the future remains must-use.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Reranker: Send + Sync {
     async fn rerank(
