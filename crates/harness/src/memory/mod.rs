@@ -105,7 +105,11 @@ pub struct SaveMemoryRequest {
 pub struct SearchMemoriesRequest {
     pub user_id: String,
     pub kg_id: String,
-    /// Empty searches all sessions.
+    /// Empty searches all sessions. Any other value is an EXACT-match filter,
+    /// not a "default session" sentinel: a corpus partitioned per conversation
+    /// (one `session_id` per transcript) returns zero rows for any id that no
+    /// row carries, which is indistinguishable from an empty memory. Pass `""`
+    /// unless you hold a `session_id` read off a stored [`Memory`].
     pub session_id: String,
     pub queries: Vec<String>,
     pub limit: usize,

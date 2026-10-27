@@ -5,8 +5,11 @@
 //! - `save_memory`: args `{prompt, response, summary, sessionId,
 //!   subjects: [{text, description, key}]}`; saves with source
 //!   "agent_tool"; returns `{"memory": <Memory JSON>}`.
-//! - `search_memories`: args `{queries: [string] (required), topK,
-//!   sessionId}`; returns `{"memories": [SlimMemory previews]}`.
+//! - `search_memories`: args `{queries: [string] (required), topK}`;
+//!   returns `{"memories": [SlimMemory previews]}`. `sessionId` is accepted
+//!   from a programmatic caller but is not advertised to the model — it is an
+//!   exact-match filter, and every value a model invents for it (`"default"`,
+//!   `"main"`) excludes every row of a session-partitioned corpus.
 //! - `search_subjects`: args `{queries (required), topK}`; returns
 //!   `{"subjects": [Subject JSON]}`.
 //! - `search_memories_in_subjects`: args `{subject_id, queries (required),
@@ -203,8 +206,7 @@ impl Tool for SearchMemoriesTool {
                 "required": ["queries"],
                 "properties": {
                     "queries": {"type": "array", "items": {"type": "string"}},
-                    "topK": {"type": "integer"},
-                    "sessionId": {"type": "string"}
+                    "topK": {"type": "integer"}
                 }
             }),
         }
@@ -217,6 +219,10 @@ impl Tool for SearchMemoriesTool {
             queries: Vec<String>,
             #[serde(default, rename = "topK")]
             top_k: i64,
+            /// Still accepted from a programmatic caller, deliberately NOT in the
+            /// advertised schema: it is an exact-match filter (see
+            /// [`SearchMemoriesRequest::session_id`]), not an "unscoped" sentinel,
+            /// and a model that is shown the field cannot enumerate valid values.
             #[serde(default, rename = "sessionId")]
             session_id: String,
         }
@@ -491,5 +497,90 @@ mod tests {
         let memories = scoped["memories"].as_array().expect("memories array");
         assert_eq!(memories.len(), 1, "scoped output: {scoped}");
         assert_eq!(memories[0]["id"], pair_id);
+    }
+
+    /// Characterises the `session_id` sentinel on the store request: `""` searches
+    /// every session, and any other value is an exact-match filter that returns
+    /// nothing when no row carries it. A plausible-looking `"default"` is not a
+    /// synonym for "unscoped" — it is a session name that nothing was saved under.
+    /// This is why `search_memories` does not advertise `sessionId` to the model.
+    #[tokio::test]
+    async fn session_id_is_an_exact_filter_not_an_unscoped_sentinel() {
+        let store = Arc::new(new_test_store().await);
+        let tools = memory_tools(Arc::clone(&store), "session-user", "");
+
+        // Seed one memory under a per-conversation session id, the way a
+        // transcript-shaped corpus (LongMemEval) is loaded.
+        tools[0]
+            .execute(json!({
+                "prompt": "How long is your commute?",
+                "response": "45 minutes each way",
+                "summary": "Commute length",
+                "sessionId": "answer_40a90d51"
+            }))
+            .await
+            .expect("save tool");
+
+        let search = &tools[1];
+        let count = |out: &Value| out["memories"].as_array().expect("memories array").len();
+
+        // Omitted -> unscoped: the row is found.
+        let unscoped = search
+            .execute(json!({"queries": ["commute"], "topK": 5}))
+            .await
+            .expect("unscoped search");
+        assert_eq!(count(&unscoped), 1, "unscoped search: {unscoped}");
+
+        // Explicit "" -> same unscoped behaviour.
+        let empty = search
+            .execute(json!({"queries": ["commute"], "topK": 5, "sessionId": ""}))
+            .await
+            .expect("empty-session search");
+        assert_eq!(count(&empty), 1, "empty sessionId search: {empty}");
+
+        // The exact seeded session -> found.
+        let exact = search
+            .execute(json!({"queries": ["commute"], "topK": 5, "sessionId": "answer_40a90d51"}))
+            .await
+            .expect("exact-session search");
+        assert_eq!(count(&exact), 1, "exact sessionId search: {exact}");
+
+        // Any other value -> zero rows, with no error. These are the two values a
+        // model reaches for when it is shown a `sessionId` field it cannot enumerate.
+        for invented in ["default", "main"] {
+            let out = search
+                .execute(json!({"queries": ["commute"], "topK": 5, "sessionId": invented}))
+                .await
+                .expect("invented-session search");
+            assert_eq!(
+                count(&out),
+                0,
+                "sessionId {invented:?} should admit no rows: {out}"
+            );
+        }
+    }
+
+    /// `search_memories` must not advertise `sessionId`. Nothing in `ToolOptions`
+    /// can set it, so the model is its only producer, and it cannot enumerate valid
+    /// values before its first search — every value it invents silently excludes
+    /// every row of a session-partitioned corpus. Regression guard for
+    /// ditto-subnet#3206.
+    #[tokio::test]
+    async fn search_memories_does_not_advertise_session_id() {
+        let store = Arc::new(new_test_store().await);
+        let tools = memory_tools(store, "u", "kg");
+        let def = tools[1].definition();
+        assert_eq!(def.name, "search_memories");
+        let props = def.input_schema["properties"]
+            .as_object()
+            .expect("properties object");
+        assert!(
+            !props.contains_key("sessionId"),
+            "search_memories must not advertise sessionId: {:?}",
+            def.input_schema
+        );
+        // The fields it does advertise stay advertised.
+        assert!(props.contains_key("queries"), "{:?}", def.input_schema);
+        assert!(props.contains_key("topK"), "{:?}", def.input_schema);
     }
 }
