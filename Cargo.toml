@@ -10,7 +10,7 @@ repository = "https://github.com/ditto-assistant/ditto-harness"
 
 [workspace.dependencies]
 # Database (Turso DB, SQLite-family, async)
-turso = "0.7.0-pre.6"
+turso = "0.8.3"
 # LLM providers
 rig-core = "0.38.2"
 # Async runtime
